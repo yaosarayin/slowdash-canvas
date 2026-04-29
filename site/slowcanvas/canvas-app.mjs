@@ -14,9 +14,8 @@
 //   config=slowcanvas-NAME.json   load this layout on startup
 //   mode=edit                     start in edit mode (default in view mode)
 
-import { JG as $, JGDateTime } from '../slowjs/jagaimo/jagaimo.mjs';
+import { JG as $ } from '../slowjs/jagaimo/jagaimo.mjs';
 import { Frame } from '../slowjs/frame.mjs';
-import { Platform } from '../slowjs/platform.mjs';
 import { CanvasAPI } from './canvas-api.mjs';
 import { CanvasEditor } from './canvas-editor.mjs';
 import { ITEM_REGISTRY, makeDefaultConfig, getPropertyFields } from './canvas-items.mjs';
