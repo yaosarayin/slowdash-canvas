@@ -1,0 +1,48 @@
+<!DOCTYPE HTML>
+<!-- SlowDash Canvas Editor
+     Part of the slowdash-canvas submodule (https://github.com/normalcomputing/slowdash-canvas)
+     Author: Yao Yin  |  Created: 2026-04-29
+
+     URL parameters:
+       config=slowcanvas-NAME.json   — load a saved canvas layout
+       mode=edit                     — start in edit mode (default when no config given)
+-->
+
+<html lang="en">
+<head>
+  <meta http-equiv="content-type" content="text/html; charset=UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SlowCanvas</title>
+
+  <link rel="icon" href="favicon.png">
+
+  <!-- Base SlowDash styles (shared header/buttons/selects) -->
+  <link rel="stylesheet" type="text/css" href="slowjs/slowdash.css">
+  <!-- Theme (light or dark, set by canvas-app.mjs at runtime) -->
+  <link rel="stylesheet" type="text/css" id="sd-theme-css">
+  <!-- Canvas-editor-specific layout and components -->
+  <link rel="stylesheet" type="text/css" href="slowcanvas/canvas.css">
+</head>
+
+<body>
+  <!-- Outer flex container: header on top, body fills the rest -->
+  <div id="sc-root">
+
+    <!-- Header bar — populated by Frame (same as slowplot.html) -->
+    <div id="sc-header"></div>
+
+    <!-- Body: [toolbar | viewport | properties] (columns built by canvas-app.mjs) -->
+    <div id="sc-body">Loading…</div>
+
+  </div>
+
+  <script type="module">
+    import { CanvasApp } from './slowcanvas/canvas-app.mjs';
+
+    window.addEventListener('DOMContentLoaded', async () => {
+        const app = new CanvasApp();
+        await app.run();
+    });
+  </script>
+</body>
+</html>
