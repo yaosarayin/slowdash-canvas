@@ -60,13 +60,12 @@ export class CanvasApp {
             return;
         }
 
-        // Apply theme from project style
+        // Load theme CSS and wait for it — mirrors Platform._load_theme() so that
+        // CSS custom properties (including --sd-header-bg purple) are defined before
+        // the Frame and any other elements that depend on them are created.
         const style = this.projectConfig.style || {};
         const theme  = style.theme || 'light';
-        const themeLink = document.getElementById('sd-theme-css');
-        if (themeLink) {
-            themeLink.href = `./slowjs/slowdash-${theme}.css`;
-        }
+        await _loadThemeCSS(theme);
 
         // Build layout
         this._buildLayout();
@@ -439,4 +438,19 @@ function _itemIcon(type) {
         'data-display':   '🔢',
         'control-button': '⚙',
     }[type] || '➕';
+}
+
+/**
+ * Set the theme CSS link href and await the load event, mirroring Platform._load_theme().
+ * This ensures CSS custom properties (e.g. --sd-header-bg purple) are resolved
+ * before the Frame and other styled elements are created.
+ */
+async function _loadThemeCSS(theme) {
+    const link = document.getElementById('sd-theme-css');
+    if (!link) return;
+    return new Promise((resolve) => {
+        link.addEventListener('load',  resolve, { once: true });
+        link.addEventListener('error', resolve, { once: true });   // resolve even on 404
+        link.href = 'slowjs/slowdash-' + theme + '.css';
+    });
 }
