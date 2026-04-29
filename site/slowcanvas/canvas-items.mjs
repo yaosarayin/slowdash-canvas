@@ -142,20 +142,9 @@ class PlotButton extends ItemRenderer {
         });
         g.appendChild(rect);
 
-        // Icon
-        const iconX = x + 12;
-        const iconY = y + height / 2;
-        const icon = svgText('📈', {
-            x: iconX, y: iconY,
-            'font-size': Math.min(height * 0.5, 18),
-            'dominant-baseline': 'middle',
-            'text-anchor': 'middle',
-        });
-        g.appendChild(icon);
-
-        // Label text
+        // Label text (centred in the button)
         const txt = svgText(label || 'Plot', {
-            x: x + width / 2 + 6,
+            x: x + width / 2,
             y: y + height / 2,
             fill: textColor,
             'font-size': s.fontSize || Math.min(height * 0.38, 15),
@@ -303,20 +292,9 @@ class ControlButton extends ItemRenderer {
         });
         g.appendChild(rect);
 
-        // Icon
-        const icon = svgText('⚙', {
-            x: x + 14,
-            y: y + height / 2,
-            'font-size': Math.min(height * 0.5, 18),
-            'dominant-baseline': 'middle',
-            'text-anchor': 'middle',
-            fill: textColor,
-        });
-        g.appendChild(icon);
-
-        // Label
+        // Label (centred in the button)
         const txt = svgText(label || 'Run', {
-            x: x + width / 2 + 6,
+            x: x + width / 2,
             y: y + height / 2,
             fill: textColor,
             'font-size': s.fontSize || Math.min(height * 0.38, 15),

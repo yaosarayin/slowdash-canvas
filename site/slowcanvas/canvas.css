@@ -54,34 +54,24 @@ html, body {
 }
 
 .sc-toolbar-btn {
-    display:        flex;
-    flex-direction: column;
-    align-items:    center;
-    gap:            2px;
-    padding:        6px 4px;
+    display:        block;
+    width:          100%;
+    padding:        6px 8px;
     border:         1px solid transparent;
-    border-radius:  6px;
+    border-radius:  4px;
     background:     transparent;
     cursor:         pointer;
-    font-size:      0.75rem;
+    font-size:      0.78rem;
+    text-align:     left;
     color:          var(--sd-color-text, black);
     transition:     background 0.1s, border-color 0.1s;
+    white-space:    normal;
+    word-break:     break-word;
 }
 
 .sc-toolbar-btn:hover {
-    background:   var(--sd-header-btn-bg-hover, rgba(0,0,0,0.08));
+    background:   var(--sd-table-row-hover, rgba(0,0,0,0.08));
     border-color: var(--sd-popup-border, #bbb);
-}
-
-.sc-tb-icon {
-    font-size: 1.4rem;
-    line-height: 1;
-}
-
-.sc-tb-label {
-    text-align: center;
-    white-space: normal;
-    word-break: break-word;
 }
 
 .sc-toolbar-sep {

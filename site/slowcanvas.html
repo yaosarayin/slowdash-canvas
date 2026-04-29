@@ -18,8 +18,9 @@
 
   <!-- Base SlowDash styles (shared header/buttons/selects) -->
   <link rel="stylesheet" type="text/css" href="slowjs/slowdash.css">
-  <!-- Theme (light or dark, set by canvas-app.mjs at runtime) -->
-  <link rel="stylesheet" type="text/css" id="sd-theme-css">
+  <!-- Theme: default to light (purple header). canvas-app.mjs replaces this href
+       at runtime for projects configured with theme: dark. -->
+  <link rel="stylesheet" type="text/css" id="sd-theme-css" href="slowjs/slowdash-light.css">
   <!-- Canvas-editor-specific layout and components -->
   <link rel="stylesheet" type="text/css" href="slowcanvas/canvas.css">
 </head>

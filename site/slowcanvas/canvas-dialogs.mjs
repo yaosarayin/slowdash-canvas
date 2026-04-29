@@ -69,7 +69,7 @@ export function openUploadSVGDialog(onLoaded) {
     let selectedText = '';
 
     const dropZone = el('div', { class: 'sc-drop-zone' },
-        '📂  Drop an SVG file here, or click to browse'
+        'Drop an SVG file here, or click to browse'
     );
     const fileInput = el('input', { type: 'file', accept: '.svg,image/svg+xml', style: { display: 'none' } });
     const feedback  = el('div',   { class: 'sc-upload-feedback' });
@@ -92,7 +92,7 @@ export function openUploadSVGDialog(onLoaded) {
             selectedName = nameInput.value || name;
             nameInput.value = selectedName;
             selectedText = text;
-            feedback.textContent = `✓ Loaded: ${name} (${(text.length/1024).toFixed(1)} KB)`;
+            feedback.textContent = `Loaded: ${name} (${(text.length/1024).toFixed(1)} KB)`;
             feedback.style.color = 'var(--sd-color-text, green)';
         });
     });
@@ -109,7 +109,7 @@ export function openUploadSVGDialog(onLoaded) {
                 selectedName = nameInput.value || name;
                 nameInput.value = selectedName;
                 selectedText = text;
-                feedback.textContent = `✓ Loaded: ${name}`;
+                feedback.textContent = `Loaded: ${name}`;
                 feedback.style.color = 'green';
             });
         }
@@ -183,7 +183,7 @@ export function openAddItemDialog(typeDescriptors, onAdd) {
  */
 export function openOpenCanvasDialog(files, onOpen) {
     if (!files.length) {
-        alert('No saved canvas layouts found.\nSave a layout first using the 💾 button.');
+        alert('No saved canvas layouts found.\nSave a layout first using the Save button.');
         return;
     }
 
@@ -315,7 +315,7 @@ function _showSVGEditorNotInstalled() {
         el('p', {}, 'Then restart slowdash.'),
         el('hr', {}),
         el('p', {}, 'Alternatively, edit your SVG with any external editor (Inkscape, Illustrator, etc.) ' +
-            'and re-upload it with the 🖼 Upload SVG button.')
+            'and re-upload it with the "Upload SVG" button.')
     );
     openDialog('SVG Editor Not Available', content, [
         { label: 'OK', action: () => false },
@@ -416,7 +416,7 @@ export function buildPropertiesPanel(container, { ITEM_REGISTRY, getPropertyFiel
 
         // Delete button at the bottom
         const delBtn = el('button', { class: 'sc-btn sc-btn-danger', style: { marginTop: '12px', width: '100%' } },
-            '🗑 Delete Item');
+            'Delete Item');
         delBtn.addEventListener('click', () => {
             if (confirm(`Delete item "${config.label || config.id}"?`)) {
                 container.dispatchEvent(new CustomEvent('sc-props-delete', {

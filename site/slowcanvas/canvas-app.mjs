@@ -60,12 +60,14 @@ export class CanvasApp {
             return;
         }
 
-        // Load theme CSS and wait for it — mirrors Platform._load_theme() so that
-        // CSS custom properties (including --sd-header-bg purple) are defined before
-        // the Frame and any other elements that depend on them are created.
+        // The HTML already loads slowdash-light.css by default (purple header).
+        // Only swap the theme link if the project explicitly uses a different theme.
         const style = this.projectConfig.style || {};
         const theme  = style.theme || 'light';
-        await _loadThemeCSS(theme);
+        if (theme !== 'light') {
+            const themeLink = document.getElementById('sd-theme-css');
+            if (themeLink) themeLink.href = 'slowjs/slowdash-' + theme + '.css';
+        }
 
         // Build layout
         this._buildLayout();
@@ -138,7 +140,7 @@ export class CanvasApp {
 
         const editBtn = document.getElementById('sc-edit-btn');
         if (editBtn) {
-            editBtn.textContent = editing ? '👁 View' : '✏️ Edit';
+            editBtn.textContent = editing ? 'View' : 'Edit';
             editBtn.title       = editing ? 'Switch to view mode' : 'Switch to edit mode';
         }
 
@@ -156,7 +158,7 @@ export class CanvasApp {
         this.layoutName  = null;
         this.layoutTitle = null;
         this.editor.loadLayout({ canvas: {}, items: [] });
-        this.frame.setStatus('New canvas — use ✏️ Edit mode to add items');
+        this.frame.setStatus('New canvas — switch to Edit mode to add items');
     }
 
     async _loadLayout(filenameOrName) {
@@ -278,14 +280,12 @@ export class CanvasApp {
         const buttons = [
             {
                 id: 'tb-upload-svg',
-                icon: '🖼',
                 label: 'Upload SVG',
                 title: 'Upload an SVG file to use as the canvas background',
                 action: () => this._onUploadSVG(),
             },
             {
                 id: 'tb-edit-svg',
-                icon: '✏️',
                 label: 'Edit SVG',
                 title: 'Open the background SVG in SVG-Edit',
                 action: () => this._onEditSVG(),
@@ -293,7 +293,6 @@ export class CanvasApp {
             { type: 'separator' },
             ...Object.entries(ITEM_REGISTRY).map(([type, Cls]) => ({
                 id: `tb-add-${type}`,
-                icon: _itemIcon(type),
                 label: 'Add ' + (Cls.label || type),
                 title: 'Add a ' + (Cls.label || type) + ' to the canvas',
                 action: () => this._onAddItem(type),
@@ -301,8 +300,7 @@ export class CanvasApp {
             { type: 'separator' },
             {
                 id: 'tb-delete-item',
-                icon: '🗑',
-                label: 'Delete',
+                label: 'Delete Item',
                 title: 'Delete the selected item',
                 action: () => {
                     if (this.editor.selectedId) this.editor.removeItem(this.editor.selectedId);
@@ -321,7 +319,7 @@ export class CanvasApp {
             btn.id        = b.id;
             btn.className = 'sc-toolbar-btn';
             btn.title     = b.title || b.label;
-            btn.innerHTML = `<span class="sc-tb-icon">${b.icon}</span><span class="sc-tb-label">${b.label}</span>`;
+            btn.textContent = b.label;
             btn.addEventListener('click', b.action);
             toolbarDiv.appendChild(btn);
         }
@@ -335,16 +333,16 @@ export class CanvasApp {
     _buildHeaderControls() {
         // Edit/View toggle
         const editBtn = document.createElement('button');
-        editBtn.id        = 'sc-edit-btn';
-        editBtn.textContent = '✏️ Edit';
+        editBtn.id          = 'sc-edit-btn';
+        editBtn.textContent = 'Edit';
         editBtn.title       = 'Switch to edit mode';
         editBtn.addEventListener('click', () => this.setEditing(!this.editing));
         this.frame.appendButton($(editBtn));
 
         // Save
         const saveBtn = document.createElement('button');
-        saveBtn.innerHTML = '💾';
-        saveBtn.title     = 'Save canvas layout';
+        saveBtn.textContent = 'Save';
+        saveBtn.title       = 'Save canvas layout';
         saveBtn.addEventListener('click', () => {
             openSaveCanvasDialog(this.layoutName, (name, title) => {
                 this._saveLayout(name, title);
@@ -354,8 +352,8 @@ export class CanvasApp {
 
         // Open
         const openBtn = document.createElement('button');
-        openBtn.innerHTML = '📂';
-        openBtn.title     = 'Open a saved canvas layout';
+        openBtn.textContent = 'Open';
+        openBtn.title       = 'Open a saved canvas layout';
         openBtn.addEventListener('click', async () => {
             const files = await CanvasAPI.listFiles('slowcanvas-');
             const mapped = files.map(f => ({ name: f.name }));
@@ -368,16 +366,16 @@ export class CanvasApp {
 
         // Home
         const homeBtn = document.createElement('button');
-        homeBtn.innerHTML = '🏠';
-        homeBtn.title     = 'Home';
+        homeBtn.textContent  = 'Home';
+        homeBtn.title        = 'Home';
         homeBtn.addEventListener('click', () => window.open('./'));
         homeBtn.style.marginLeft = '1em';
         this.frame.appendButton($(homeBtn));
 
         // Docs
         const docBtn = document.createElement('button');
-        docBtn.innerHTML = '❓';
-        docBtn.title     = 'Documentation';
+        docBtn.textContent = 'Help';
+        docBtn.title       = 'Documentation';
         docBtn.addEventListener('click', () => window.open('./slowdocs/index.html'));
         this.frame.appendButton($(docBtn));
     }
@@ -400,7 +398,7 @@ export class CanvasApp {
     _onEditSVG() {
         const bgFile = this.editor.background?.file;
         if (!bgFile) {
-            alert('No background SVG loaded.\nUpload an SVG first using the 🖼 Upload SVG button.');
+            alert('No background SVG loaded.\nUpload an SVG first using the "Upload SVG" button.');
             return;
         }
         openSVGEditorDialog(bgFile);
@@ -432,25 +430,3 @@ function _stripPrefix(filenameOrName) {
         .replace(/\.json$/, '');
 }
 
-function _itemIcon(type) {
-    return {
-        'plot-button':    '📈',
-        'data-display':   '🔢',
-        'control-button': '⚙',
-    }[type] || '➕';
-}
-
-/**
- * Set the theme CSS link href and await the load event, mirroring Platform._load_theme().
- * This ensures CSS custom properties (e.g. --sd-header-bg purple) are resolved
- * before the Frame and other styled elements are created.
- */
-async function _loadThemeCSS(theme) {
-    const link = document.getElementById('sd-theme-css');
-    if (!link) return;
-    return new Promise((resolve) => {
-        link.addEventListener('load',  resolve, { once: true });
-        link.addEventListener('error', resolve, { once: true });   // resolve even on 404
-        link.href = 'slowjs/slowdash-' + theme + '.css';
-    });
-}
