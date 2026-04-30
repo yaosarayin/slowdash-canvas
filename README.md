@@ -32,10 +32,10 @@ bash slowdash-canvas/install.sh
 
 The editor opens in **Edit** mode when no layout is specified.  Use the toolbar on the left to:
 
-- **🖼 Upload SVG** — pick a local SVG file; it is stored in your project config directory.
-- **✏️ Edit SVG** — open the background SVG in SVG-Edit (requires [installation](lib/svgedit/README.md)).
-- **📈 Add Plot Button** — add a button that navigates to a SlowPlot URL.
-- **🔢 Add Data Display** — add a live readout bound to a data channel.
+- **Upload SVG** — pick a local SVG file; it is stored in your project config directory.
+- **Edit SVG** — open the background SVG in SVG-Edit (requires [installation](lib/svgedit/README.md)).
+- **Add Plot Button** — add a button that navigates to a SlowPlot URL.
+- **Add Data Display** — add a live readout bound to a data channel.
 - **⚙ Add Control Button** — add a button that runs a SlowDash script action.
 
 Click any item to select it; the **Properties** panel on the right lets you edit its label, size,
