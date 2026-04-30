@@ -1,40 +1,63 @@
-// canvas-items.mjs — item type definitions for the canvas editor overlay
+// canvas-items.mjs — item type definitions for the SlowCanvas editor
 // Author: Yao Yin
-// Created: 2026-04-29
 //
-// Each item type is a plain-object descriptor plus static rendering helpers.
-// Items are drawn as SVG foreign-object or SVG group elements inside the
-// canvas viewport SVG so they scale with the viewport transform.
+// The on-disk format mirrors the existing slowdash canvas-panel schema
+// (app/site/slowjs/panel-canvas.mjs):
 //
-// Item schema (stored in the layout JSON):
-//   {
-//     id:     string   — unique identifier
-//     type:   string   — one of ITEM_TYPES keys
-//     x:      number   — left edge in canvas coordinates
-//     y:      number   — top edge in canvas coordinates
-//     width:  number   — width in canvas coordinates
-//     height: number   — height in canvas coordinates
-//     label:  string   — display label
-//     ... type-specific fields ...
-//     style:  object   — visual overrides (fill, color, rx, fontSize, etc.)
-//   }
+//   { type, attr: {...}, metric?: {...}, action?: {...} }
+//
+// `type` is one of the slowdash canvas item kinds: image, text, box,
+// circle, valve, solenoid, button, plot, micro_plot, grid.
+//
+// The editor only needs *visual approximations* of each item — the
+// authoritative rendering happens in the live-preview iframe (slowdash.html)
+// which loads the same JSON via the real panel-canvas renderer.
 
 
-// ── Constants ──────────────────────────────────────────────────────────────── //
+// ── Constants ────────────────────────────────────────────────────────── //
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
-const DEFAULTS = {
-    'plot-button':    { width: 140, height: 44, label: 'Open Plot',    style: { fill: '#3498db', color: 'white',  rx: 8 } },
-    'data-display':   { width: 180, height: 70, label: 'Value',        style: { fill: 'white',   color: '#009090', border: '#009090' } },
-    'control-button': { width: 140, height: 44, label: 'Run Command',  style: { fill: '#e74c3c', color: 'white',  rx: 8 } },
+/** Defaults used when a new item is added from the toolbar. */
+const ITEM_PRESETS = {
+    text:     { width: 120, height: 32, label: 'Label',
+                attr: { 'font-size': '14pt', 'fill': '#222', 'text': 'Label' } },
+    box:      { width: 80,  height: 80,
+                attr: { 'stroke': '#333', 'stroke-width': 1, 'fill': 'none' } },
+    circle:   { width: 60,  height: 60,
+                attr: { 'stroke': '#333', 'stroke-width': 1, 'fill': 'none' } },
+    button:   { width: 120, height: 36, label: 'Button',
+                attr: { 'rx': 6, 'ry': 6, 'stroke': '#333', 'fill': 'none', 'label': 'Button' } },
+    image:    { width: 200, height: 150,
+                attr: { 'href': '' } },
+    valve:    { width: 30,  height: 30,
+                attr: { 'stroke': '#333', 'fill': 'none', 'orientation': 'horizontal' } },
+    solenoid: { width: 60,  height: 30,
+                attr: { 'stroke': '#333', 'stroke-width': 3, 'fill': 'none', 'turns': 12 } },
+    grid:     { width: null, height: null,
+                attr: { 'dx': 50, 'dy': 50, 'stroke': 'lightgray', 'stroke-width': 0.5 } },
 };
 
-// ── Utility ────────────────────────────────────────────────────────────────── //
+/** Friendly labels shown in the toolbar's "Add" menu. */
+const ITEM_LABELS = {
+    text:     'Text',
+    box:      'Box',
+    circle:   'Circle',
+    button:   'Button',
+    image:    'Image',
+    valve:    'Valve',
+    solenoid: 'Solenoid',
+    grid:     'Grid',
+};
+
+
+// ── Utility ──────────────────────────────────────────────────────────── //
 
 function svgEl(tag, attrs = {}) {
     const el = document.createElementNS(SVG_NS, tag);
-    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    for (const [k, v] of Object.entries(attrs)) {
+        if (v !== null && v !== undefined) el.setAttribute(k, v);
+    }
     return el;
 }
 
@@ -44,378 +67,325 @@ function svgText(txt, attrs = {}) {
     return el;
 }
 
-/** Returns a safe DOM-id for an item id (removes special chars). */
-function domId(itemId) {
-    return 'sc-item-' + itemId.replace(/[^a-z0-9]/gi, '_');
+function clientItemId() {
+    return 'item-' + Math.random().toString(36).slice(2, 9);
 }
 
+/** Returns the item's bounding box (x, y, width, height) in canvas coords. */
+export function getItemBBox(item) {
+    const a = item.attr || {};
+    const x = parseFloat(a.x) || 0;
+    const y = parseFloat(a.y) || 0;
+    const w = parseFloat(a.width)  || ITEM_PRESETS[item.type]?.width  || 80;
+    const h = parseFloat(a.height) || ITEM_PRESETS[item.type]?.height || 30;
+    return { x, y, width: w, height: h };
+}
 
-// ── ItemRenderer base ──────────────────────────────────────────────────────── //
-
-/**
- * Base class.  Subclasses override render() and optionally updateData().
- * All methods are static — there is no instance state; the SVG DOM is the state.
- */
-class ItemRenderer {
-    /** Human-readable label used in the "Add item" dialog. */
-    static label = '';
-
-    /**
-     * Returns a new default config object for this item type.
-     * @param {number} x  Suggested placement x.
-     * @param {number} y  Suggested placement y.
-     */
-    static defaultConfig(type, x = 100, y = 100) {
-        const d = DEFAULTS[type] || { width: 120, height: 40, label: 'Item', style: {} };
-        return {
-            id:     'item-' + Math.random().toString(36).slice(2, 9),
-            type,
-            x, y,
-            width:  d.width,
-            height: d.height,
-            label:  d.label,
-            style:  { ...d.style },
-        };
+/** Read a nested key like 'attr.x' or 'metric.channel' from the item config. */
+export function getItemKey(item, path) {
+    const parts = path.split('.');
+    let v = item;
+    for (const p of parts) {
+        if (v == null) return undefined;
+        v = v[p];
     }
+    return v;
+}
 
-    /**
-     * Render the item into an SVG <g> element.
-     * @param {object} config   Item config object.
-     * @param {boolean} editing Whether the canvas is in edit mode.
-     * @returns {SVGGElement}
-     */
-    static render(config, editing) {
-        throw new Error('ItemRenderer.render() not implemented');
+/** Set a nested key, auto-creating intermediate objects. */
+export function setItemKey(item, path, value) {
+    const parts = path.split('.');
+    let target = item;
+    for (let i = 0; i < parts.length - 1; i++) {
+        if (target[parts[i]] == null || typeof target[parts[i]] !== 'object') {
+            target[parts[i]] = {};
+        }
+        target = target[parts[i]];
     }
-
-    /**
-     * Update the item's visual from a fresh data value.
-     * Called periodically during view mode.
-     * @param {SVGGElement} g        The item's root <g> element.
-     * @param {object}      config   Item config.
-     * @param {number|null} value    Latest data value (null if unavailable).
-     * @param {string}      status   'active' | 'inactive' | 'dead' | 'none'
-     */
-    static updateData(g, config, value, status) {
-        // default: nothing
-    }
-
-    /**
-     * Returns an array of form-field descriptors for the properties panel.
-     * Each descriptor: { key, label, type ('text'|'number'|'color'|'checkbox'), placeholder }
-     */
-    static propertyFields() {
-        return [
-            { key: 'label',  label: 'Label',  type: 'text' },
-            { key: 'x',      label: 'X',      type: 'number' },
-            { key: 'y',      label: 'Y',      type: 'number' },
-            { key: 'width',  label: 'Width',  type: 'number' },
-            { key: 'height', label: 'Height', type: 'number' },
-        ];
-    }
-
-    /** Names of data channels this item needs (empty array = none). */
-    static getChannels(config) {
-        return [];
+    if (value === '' || value === null || value === undefined) {
+        delete target[parts[parts.length - 1]];
+    } else {
+        target[parts[parts.length - 1]] = value;
     }
 }
 
 
-// ── PlotButton ─────────────────────────────────────────────────────────────── //
+// ── Default config factory ───────────────────────────────────────────── //
 
-class PlotButton extends ItemRenderer {
-    static label = 'Plot Button';
+export function makeDefaultConfig(type, x = 100, y = 100) {
+    const preset = ITEM_PRESETS[type] || { width: 80, height: 80, attr: {} };
+    const attr = {
+        x, y,
+        ...(preset.width  != null ? { width:  preset.width }  : {}),
+        ...(preset.height != null ? { height: preset.height } : {}),
+        ...preset.attr,
+    };
+    if (type === 'text') {
+        attr.x = x;
+        attr.y = y + (preset.height || 32) * 0.7;  // baseline at ~70% height
+    }
+    const cfg = { _id: clientItemId(), type, attr };
+    return cfg;
+}
 
-    static render(config, editing) {
-        const g = svgEl('g', { id: domId(config.id), class: 'sc-item sc-plot-button' });
-        const s = config.style || {};
-        const rx = s.rx ?? 8;
-        const fill = s.fill || '#3498db';
-        const textColor = s.color || 'white';
-        const { x, y, width, height, label } = config;
 
-        const rect = svgEl('rect', {
-            x, y, width, height, rx,
-            fill,
-            stroke: s.stroke || fill,
-            'stroke-width': 1,
+// ── Renderer (visual approximation in the editor) ────────────────────── //
+
+export function renderItem(config, editing = false) {
+    const a   = config.attr || {};
+    const bb  = getItemBBox(config);
+    const g   = svgEl('g', { 'class': 'sc-item', 'data-item-id': config._id });
+
+    // Transparent bounding-box rect for reliable hit-testing in edit mode.
+    // Without this, items with `fill: none` (solenoid, valve outlines) were
+    // almost impossible to click. Inserted first so the visual layers paint
+    // on top of it.
+    if (editing && config.type !== 'grid') {
+        const hit = svgEl('rect', {
+            x: bb.x, y: (config.type === 'text') ? bb.y - bb.height : bb.y,
+            width:  bb.width,
+            height: bb.height,
+            fill:   'transparent',
+            stroke: 'none',
+            'data-role': 'hitbox',
+            'pointer-events': 'all',
         });
-        g.appendChild(rect);
+        g.appendChild(hit);
+    }
 
-        // Label text (centred in the button)
-        const txt = svgText(label || 'Plot', {
-            x: x + width / 2,
-            y: y + height / 2,
-            fill: textColor,
-            'font-size': s.fontSize || Math.min(height * 0.38, 15),
-            'font-family': 'sans-serif',
-            'dominant-baseline': 'middle',
-            'text-anchor': 'middle',
-        });
-        g.appendChild(txt);
-
-        if (!editing && config.href) {
-            g.style.cursor = 'pointer';
-            g.addEventListener('click', () => {
-                window.open(config.href, config.target || '_blank');
+    switch (config.type) {
+        case 'text': {
+            const t = svgText(a.text || '(text)', {
+                x: parseFloat(a.x) || 0,
+                y: parseFloat(a.y) || 0,
+                fill: a.fill || '#222',
+                'font-size': a['font-size'] || '14pt',
+                'font-family': a['font-family'] || 'sans-serif',
+                'font-weight': a['font-weight'] || 'normal',
             });
+            g.appendChild(t);
+            break;
         }
-
-        return g;
-    }
-
-    static propertyFields() {
-        return [
-            ...super.propertyFields(),
-            { key: 'href',   label: 'URL (slowplot link)', type: 'text', placeholder: 'slowplot.html?config=...' },
-            { key: 'target', label: 'Open in',            type: 'select', options: ['_blank', '_self'] },
-            { key: 'style.fill',  label: 'Background',    type: 'color' },
-            { key: 'style.color', label: 'Text color',    type: 'color' },
-            { key: 'style.rx',    label: 'Corner radius',  type: 'number' },
-        ];
-    }
-}
-
-
-// ── DataDisplay ────────────────────────────────────────────────────────────── //
-
-class DataDisplay extends ItemRenderer {
-    static label = 'Data Display';
-
-    static render(config, editing) {
-        const g = svgEl('g', { id: domId(config.id), class: 'sc-item sc-data-display' });
-        const s = config.style || {};
-        const { x, y, width, height, label } = config;
-
-        // Border rect
-        const rect = svgEl('rect', {
-            x, y, width, height, rx: s.rx ?? 4,
-            fill: s.fill || 'white',
-            stroke: s.border || '#009090',
-            'stroke-width': 1.5,
-        });
-        g.appendChild(rect);
-
-        // Channel label (top)
-        const labelTxt = svgText(label || config.channel || 'Channel', {
-            x: x + width / 2,
-            y: y + height * 0.32,
-            fill: s.labelColor || '#555',
-            'font-size': s.labelFontSize || Math.min(height * 0.28, 12),
-            'font-family': 'sans-serif',
-            'dominant-baseline': 'middle',
-            'text-anchor': 'middle',
-        });
-        labelTxt.setAttribute('data-role', 'label');
-        g.appendChild(labelTxt);
-
-        // Value (center, larger)
-        const valueTxt = svgText('—', {
-            x: x + width / 2,
-            y: y + height * 0.68,
-            fill: s.color || '#009090',
-            'font-size': s.fontSize || Math.min(height * 0.42, 20),
-            'font-family': 'monospace',
-            'font-weight': 'bold',
-            'dominant-baseline': 'middle',
-            'text-anchor': 'middle',
-        });
-        valueTxt.setAttribute('data-role', 'value');
-        g.appendChild(valueTxt);
-
-        return g;
-    }
-
-    static updateData(g, config, value, status) {
-        const s = config.style || {};
-        const valueTxt = g.querySelector('[data-role="value"]');
-        const rect     = g.querySelector('rect');
-        if (!valueTxt) return;
-
-        if (value === null || value === undefined) {
-            valueTxt.textContent = '—';
-            if (rect) rect.setAttribute('stroke', '#aaa');
-            return;
-        }
-
-        const fmt = config.format || '%.4g';
-        valueTxt.textContent = _formatValue(value, fmt);
-
-        const colorActive   = s.colorActive   || '#009090';
-        const colorInactive = s.colorInactive || 'orange';
-        const colorDead     = s.colorDead     || '#bbb';
-
-        let borderColor = colorActive;
-        if (status === 'inactive') borderColor = colorInactive;
-        if (status === 'dead')     borderColor = colorDead;
-
-        if (rect) rect.setAttribute('stroke', borderColor);
-        valueTxt.setAttribute('fill', borderColor);
-    }
-
-    static propertyFields() {
-        return [
-            ...super.propertyFields(),
-            { key: 'channel',      label: 'Data channel',   type: 'text',   placeholder: 'channel_name' },
-            { key: 'format',       label: 'Format string',  type: 'text',   placeholder: '%.4g' },
-            { key: 'active-above', label: 'Active above',   type: 'number', placeholder: '' },
-            { key: 'active-below', label: 'Active below',   type: 'number', placeholder: '' },
-            { key: 'style.fill',   label: 'Background',     type: 'color' },
-            { key: 'style.border', label: 'Border color',   type: 'color' },
-        ];
-    }
-
-    static getChannels(config) {
-        return config.channel ? [config.channel] : [];
-    }
-}
-
-
-// ── ControlButton ──────────────────────────────────────────────────────────── //
-
-class ControlButton extends ItemRenderer {
-    static label = 'Control Button';
-
-    static render(config, editing) {
-        const g = svgEl('g', { id: domId(config.id), class: 'sc-item sc-control-button' });
-        const s = config.style || {};
-        const rx = s.rx ?? 8;
-        const fill = s.fill || '#e74c3c';
-        const textColor = s.color || 'white';
-        const { x, y, width, height, label } = config;
-
-        const rect = svgEl('rect', {
-            x, y, width, height, rx,
-            fill,
-            stroke: s.stroke || _darken(fill),
-            'stroke-width': 1,
-        });
-        g.appendChild(rect);
-
-        // Label (centred in the button)
-        const txt = svgText(label || 'Run', {
-            x: x + width / 2,
-            y: y + height / 2,
-            fill: textColor,
-            'font-size': s.fontSize || Math.min(height * 0.38, 15),
-            'font-family': 'sans-serif',
-            'dominant-baseline': 'middle',
-            'text-anchor': 'middle',
-        });
-        g.appendChild(txt);
-
-        // Hover feedback during view mode
-        if (!editing) {
-            rect.addEventListener('mouseenter', () => rect.setAttribute('opacity', '0.85'));
-            rect.addEventListener('mouseleave', () => rect.setAttribute('opacity', '1'));
-            g.style.cursor = 'pointer';
-            g.addEventListener('click', () => {
-                // Dispatch custom event — canvas-app.mjs listens and calls CanvasAPI.sendCommand()
-                g.dispatchEvent(new CustomEvent('sc-control-click', {
-                    bubbles: true,
-                    detail: { action: config.action, params: config.params || {} },
+        case 'box': {
+            g.appendChild(svgEl('rect', {
+                x: bb.x, y: bb.y, width: bb.width, height: bb.height,
+                rx: a.rx, ry: a.ry,
+                fill: a.fill || 'none',
+                stroke: a.stroke || '#333',
+                'stroke-width': a['stroke-width'] || 1,
+            }));
+            if (config.metric?.channel) {
+                g.appendChild(svgText(config.metric.channel, {
+                    x: bb.x + bb.width / 2, y: bb.y + bb.height / 2 + 4,
+                    fill: '#888', 'font-size': '10pt', 'font-family': 'monospace',
+                    'text-anchor': 'middle',
                 }));
-            });
+            }
+            break;
         }
-
-        return g;
+        case 'circle': {
+            g.appendChild(svgEl('ellipse', {
+                cx: bb.x + bb.width / 2, cy: bb.y + bb.height / 2,
+                rx: bb.width / 2, ry: bb.height / 2,
+                fill: a.fill || 'none',
+                stroke: a.stroke || '#333',
+                'stroke-width': a['stroke-width'] || 1,
+            }));
+            break;
+        }
+        case 'button': {
+            g.appendChild(svgEl('rect', {
+                x: bb.x, y: bb.y, width: bb.width, height: bb.height,
+                rx: a.rx ?? 6, ry: a.ry ?? 6,
+                fill: a.fill || 'none',
+                stroke: a.stroke || '#333',
+                'stroke-width': a['stroke-width'] || 1,
+            }));
+            g.appendChild(svgText(a.label || 'Button', {
+                x: bb.x + bb.width / 2, y: bb.y + bb.height / 2 + 4,
+                fill: a['label-color'] || a.stroke || '#333',
+                'font-size': a['font-size'] || '11pt',
+                'text-anchor': 'middle',
+            }));
+            break;
+        }
+        case 'image': {
+            const href = a.href ? `./api/config/file/${a.href}` : '';
+            if (href) {
+                g.appendChild(svgEl('image', {
+                    x: bb.x, y: bb.y, width: bb.width, height: bb.height,
+                    href,
+                    preserveAspectRatio: 'xMidYMid meet',
+                }));
+            }
+            if (!href) {
+                g.appendChild(svgEl('rect', {
+                    x: bb.x, y: bb.y, width: bb.width, height: bb.height,
+                    fill: 'rgba(200,200,200,0.3)',
+                    stroke: '#aaa', 'stroke-dasharray': '4 3',
+                }));
+                g.appendChild(svgText('(image)', {
+                    x: bb.x + bb.width / 2, y: bb.y + bb.height / 2,
+                    fill: '#888', 'font-size': '10pt', 'text-anchor': 'middle',
+                }));
+            }
+            break;
+        }
+        case 'valve': {
+            const x0 = bb.x, y0 = bb.y;
+            const x1 = bb.x + bb.width, y1 = bb.y + bb.height;
+            const points = (a.orientation || 'horizontal').startsWith('v')
+                ? `${x0},${y0} ${x1},${y0} ${x0},${y1} ${x1},${y1} ${x0},${y0}`
+                : `${x0},${y0} ${x0},${y1} ${x1},${y0} ${x1},${y1} ${x0},${y0}`;
+            g.appendChild(svgEl('polyline', {
+                points,
+                fill: a.fill || 'none',
+                stroke: a.stroke || '#333',
+                'stroke-width': a['stroke-width'] || 1,
+            }));
+            break;
+        }
+        case 'solenoid': {
+            const n = parseInt(a.turns || 12);
+            let d = '';
+            for (let i = 0; i < n; i++) {
+                const sx = bb.x + i * bb.width / n;
+                const sy = bb.y + bb.height;
+                const ex = sx + bb.width / n;
+                const ey = sy - bb.height;
+                d += `M ${sx} ${sy} L ${ex} ${ey} `;
+            }
+            g.appendChild(svgEl('path', {
+                d,
+                fill: 'none',
+                stroke: a.stroke || '#333',
+                'stroke-width': a['stroke-width'] || 3,
+            }));
+            break;
+        }
+        case 'grid': {
+            // The "grid" item is rendered by the live preview itself.
+            // In the editor we show a faint hint so users can select/delete it.
+            const rect = svgEl('rect', {
+                x: 0, y: 0, width: '100%', height: '100%',
+                fill: 'transparent', stroke: 'rgba(120,120,200,0.3)',
+                'stroke-dasharray': '4 4', 'pointer-events': 'none',
+            });
+            g.appendChild(rect);
+            g.appendChild(svgText('(grid item)', {
+                x: 8, y: 18,
+                fill: 'rgba(120,120,200,0.7)', 'font-size': '10pt',
+            }));
+            break;
+        }
+        default: {
+            console.warn('Unknown item type:', config.type);
+            return null;
+        }
     }
-
-    static propertyFields() {
-        return [
-            ...super.propertyFields(),
-            { key: 'action', label: 'Action / command name', type: 'text',     placeholder: 'my_script_action' },
-            { key: 'params', label: 'Params (JSON)',          type: 'textarea', placeholder: '{}' },
-            { key: 'style.fill',  label: 'Background',       type: 'color' },
-            { key: 'style.color', label: 'Text color',       type: 'color' },
-            { key: 'style.rx',    label: 'Corner radius',    type: 'number' },
-        ];
-    }
+    return g;
 }
 
 
-// ── Registry ────────────────────────────────────────────────────────────────── //
+// ── Property fields shown in the side panel ──────────────────────────── //
 
-export const ITEM_REGISTRY = {
-    'plot-button':    PlotButton,
-    'data-display':   DataDisplay,
-    'control-button': ControlButton,
+const COMMON_GEOMETRY = [
+    { key: 'attr.x',      label: 'X',       type: 'number' },
+    { key: 'attr.y',      label: 'Y',       type: 'number' },
+    { key: 'attr.width',  label: 'Width',   type: 'number' },
+    { key: 'attr.height', label: 'Height',  type: 'number' },
+];
+
+const ACTION_FIELDS = [
+    { key: 'action.open',        label: 'Open URL on click',     type: 'text',
+      placeholder: 'slowplot.html?config=...' },
+    { key: 'action.submit.name', label: 'Submit name (control)', type: 'text',
+      placeholder: 'run, stop, ...' },
+];
+
+const METRIC_FIELDS = [
+    { key: 'metric.channel',      label: 'Data channel',  type: 'text',
+      placeholder: 'channel_name' },
+    { key: 'metric.format',       label: 'Format',        type: 'text',
+      placeholder: '%.4g' },
+    { key: 'metric.active-above', label: 'Active above',  type: 'number' },
+    { key: 'metric.active-below', label: 'Active below',  type: 'number' },
+];
+
+const PROPERTY_FIELDS = {
+    text: [
+        ...COMMON_GEOMETRY,
+        { key: 'attr.text',        label: 'Text',         type: 'text' },
+        { key: 'attr.fill',        label: 'Color',        type: 'color' },
+        { key: 'attr.font-size',   label: 'Font size',    type: 'text', placeholder: '14pt' },
+        { key: 'attr.font-weight', label: 'Font weight',  type: 'select',
+          options: ['normal', 'bold'] },
+        ...ACTION_FIELDS,
+        ...METRIC_FIELDS,
+    ],
+    box: [
+        ...COMMON_GEOMETRY,
+        { key: 'attr.label',  label: 'Label',         type: 'text' },
+        { key: 'attr.stroke', label: 'Stroke color',  type: 'color' },
+        { key: 'attr.fill',   label: 'Fill color',    type: 'color' },
+        { key: 'attr.rx',     label: 'Corner radius', type: 'number' },
+        ...ACTION_FIELDS,
+        ...METRIC_FIELDS,
+    ],
+    circle: [
+        ...COMMON_GEOMETRY,
+        { key: 'attr.label',  label: 'Label',        type: 'text' },
+        { key: 'attr.stroke', label: 'Stroke color', type: 'color' },
+        { key: 'attr.fill',   label: 'Fill color',   type: 'color' },
+        ...ACTION_FIELDS,
+        ...METRIC_FIELDS,
+    ],
+    button: [
+        ...COMMON_GEOMETRY,
+        { key: 'attr.label',  label: 'Label',        type: 'text' },
+        { key: 'attr.stroke', label: 'Stroke color', type: 'color' },
+        { key: 'attr.fill',   label: 'Fill color',   type: 'color' },
+        { key: 'attr.rx',     label: 'Corner radius',type: 'number' },
+        ...ACTION_FIELDS,
+    ],
+    image: [
+        ...COMMON_GEOMETRY,
+        { key: 'attr.href', label: 'File (in project config dir)', type: 'text',
+          placeholder: 'svg-FloorPlan.svg' },
+        ...ACTION_FIELDS,
+    ],
+    valve: [
+        ...COMMON_GEOMETRY,
+        { key: 'attr.orientation', label: 'Orientation', type: 'select',
+          options: ['horizontal', 'vertical'] },
+        { key: 'attr.stroke',      label: 'Stroke',      type: 'color' },
+        ...METRIC_FIELDS,
+    ],
+    solenoid: [
+        ...COMMON_GEOMETRY,
+        { key: 'attr.turns',  label: 'Turns',  type: 'number' },
+        { key: 'attr.stroke', label: 'Stroke', type: 'color' },
+        ...METRIC_FIELDS,
+    ],
+    grid: [
+        { key: 'attr.dx',     label: 'Step X',       type: 'number' },
+        { key: 'attr.dy',     label: 'Step Y',       type: 'number' },
+        { key: 'attr.stroke', label: 'Line color',   type: 'color' },
+    ],
 };
 
-/** Returns a default config for the given item type, placed at (x, y). */
-export function makeDefaultConfig(type, x = 100, y = 100) {
-    return ItemRenderer.defaultConfig(type, x, y);
-}
-
-/** Render a single item config into a new SVG group element. */
-export function renderItem(config, editing = false) {
-    const Cls = ITEM_REGISTRY[config.type];
-    if (!Cls) {
-        console.warn('Unknown item type:', config.type);
-        return null;
-    }
-    return Cls.render(config, editing);
-}
-
-/** Update the visual of an already-rendered item from new data. */
-export function updateItemData(g, config, value, status) {
-    const Cls = ITEM_REGISTRY[config.type];
-    if (Cls) Cls.updateData(g, config, value, status);
-}
-
-/** Return property field descriptors for the given item type. */
 export function getPropertyFields(type) {
-    const Cls = ITEM_REGISTRY[type];
-    return Cls ? Cls.propertyFields() : [];
+    return PROPERTY_FIELDS[type] || [];
 }
 
-/** Return all data channels needed by an item config. */
+export function getItemTypes() {
+    return Object.keys(ITEM_LABELS);
+}
+
+export function getItemLabel(type) {
+    return ITEM_LABELS[type] || type;
+}
+
 export function getItemChannels(config) {
-    const Cls = ITEM_REGISTRY[config.type];
-    return Cls ? Cls.getChannels(config) : [];
-}
-
-
-// ── Helpers ─────────────────────────────────────────────────────────────────── //
-
-/**
- * Format a numeric value using a printf-style format string.
- * Supports %d, %i, %f, %e, %g, %s.
- */
-function _formatValue(value, fmt) {
-    if (typeof value !== 'number') return String(value);
-    const m = fmt.match(/^(.*?)%([\d.+-]*)([difegs])(.*?)$/);
-    if (!m) return String(value);
-    const [, pre, spec, conv, post] = m;
-    let out;
-    switch (conv) {
-        case 'd': case 'i': out = Math.round(value).toString(); break;
-        case 'f': {
-            const dp = parseInt((spec.match(/\.(\d+)/) || [,'4'])[1]);
-            out = value.toFixed(dp);
-            break;
-        }
-        case 'e': {
-            const dp = parseInt((spec.match(/\.(\d+)/) || [,'4'])[1]);
-            out = value.toExponential(dp);
-            break;
-        }
-        case 'g': case 's': default: {
-            const sig = parseInt((spec.match(/\.(\d+)/) || [,'4'])[1]);
-            out = parseFloat(value.toPrecision(sig)).toString();
-            break;
-        }
-    }
-    return pre + out + post;
-}
-
-/** Darkens a hex color by ~20 % for border/shadow use. */
-function _darken(hex) {
-    try {
-        const n = parseInt(hex.replace('#', ''), 16);
-        const r = Math.max(0, ((n >> 16) & 0xff) - 40);
-        const g = Math.max(0, ((n >> 8)  & 0xff) - 40);
-        const b = Math.max(0, (n          & 0xff) - 40);
-        return `rgb(${r},${g},${b})`;
-    } catch { return hex; }
+    return config.metric?.channel ? [config.metric.channel] : [];
 }

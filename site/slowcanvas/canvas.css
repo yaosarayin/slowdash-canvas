@@ -1,11 +1,11 @@
 /*
  * canvas.css — styles for the SlowDash Canvas Editor
  * Author: Yao Yin
- * Created: 2026-04-29
  *
- * Inherits all CSS variables defined in slowdash.css (loaded by slowcanvas.html).
+ * Inherits all CSS variables defined in slowdash.css / slowdash-light.css.
  * Only canvas-editor-specific layout and component styles live here.
  */
+
 
 /* ── Page layout ──────────────────────────────────────────────────────────── */
 
@@ -16,20 +16,6 @@ html, body {
     overflow: hidden;
 }
 
-#sc-header {
-    flex-shrink: 0;
-}
-
-/* Full-height flex column below the header */
-#sc-body {
-    display:   flex;
-    flex-direction: row;
-    flex:      1 1 0;
-    min-height: 0;
-    overflow:  hidden;
-}
-
-/* Outer wrapper that fills the entire viewport height */
 #sc-root {
     display:        flex;
     flex-direction: column;
@@ -37,14 +23,68 @@ html, body {
     overflow:       hidden;
 }
 
+#sc-header { flex-shrink: 0; }
 
-/* ── Toolbar (left column, edit mode only) ────────────────────────────────── */
+#sc-body {
+    display:        flex;
+    flex-direction: row;
+    flex:           1 1 0;
+    min-height:     0;
+    overflow:       hidden;
+    background:     #fafafa;
+}
+
+/* ── Live preview column (left) ──────────────────────────────────────────── */
+
+.sc-preview-col {
+    flex:           0 0 38%;
+    min-width:      180px;
+    display:        flex;
+    flex-direction: column;
+    border-right:   1px solid var(--sd-popup-border, #ccc);
+    background:     #ffffff;
+    overflow:       hidden;
+}
+
+.sc-preview-hdr {
+    flex-shrink:    0;
+    padding:        4px 10px;
+    background:     var(--sd-pad-bg, #ececec);
+    border-bottom:  1px solid var(--sd-popup-border, #ccc);
+    font-size:      0.78rem;
+    font-weight:    600;
+    color:          var(--sd-color-text, #333);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.sc-preview-iframe {
+    flex:    1 1 0;
+    min-height: 0;
+    width:   100%;
+    border:  none;
+    background: white;
+}
+
+
+/* ── Splitter ─────────────────────────────────────────────────────────────── */
+
+.sc-splitter {
+    flex:        0 0 5px;
+    cursor:      col-resize;
+    background:  var(--sd-popup-border, #d0d0d0);
+    transition:  background 0.1s;
+}
+.sc-splitter:hover { background: var(--sd-header-bg, #460084); opacity: 0.7; }
+
+
+/* ── Toolbar (left of editor, edit mode only) ─────────────────────────────── */
 
 .sc-toolbar {
     display:        flex;
     flex-direction: column;
     align-items:    stretch;
-    width:          110px;
+    width:          120px;
     flex-shrink:    0;
     padding:        8px 4px;
     gap:            2px;
@@ -68,20 +108,27 @@ html, body {
     white-space:    normal;
     word-break:     break-word;
 }
-
 .sc-toolbar-btn:hover {
-    background:   var(--sd-table-row-hover, rgba(0,0,0,0.08));
+    background:   rgba(0, 0, 0, 0.05);
     border-color: var(--sd-popup-border, #bbb);
 }
-
 .sc-toolbar-sep {
-    height:           1px;
-    background:       var(--sd-popup-border, #ccc);
-    margin:           6px 4px;
+    height:     1px;
+    background: var(--sd-popup-border, #ccc);
+    margin:     6px 4px;
 }
 
 
-/* ── Editor viewport (centre) ─────────────────────────────────────────────── */
+/* ── Editor column (centre) ──────────────────────────────────────────────── */
+
+.sc-editor-col {
+    flex:           1 1 0;
+    min-width:      0;
+    display:        flex;
+    flex-direction: column;
+    overflow:       hidden;
+    background:     #f4f4f4;
+}
 
 .sc-editor-wrap {
     flex:        1 1 0;
@@ -92,33 +139,29 @@ html, body {
     background:  #f4f4f4;
 }
 
-/* The SVG root fills the editor wrap */
 .sc-viewport {
     display: block;
     width:   100%;
     height:  100%;
 }
 
-/* In edit mode: items get a subtle outline on hover */
-svg[data-editing="1"] .sc-item:hover > rect,
-svg[data-editing="1"] .sc-item:hover > circle {
-    filter: drop-shadow(0 0 3px rgba(0, 153, 255, 0.5));
+.sc-bounds-rect {
+    /* canvas page background — drawn by canvas-editor.mjs */
 }
-
-/* Grid guide overlay (shown in edit mode) */
-.sc-grid-guide {
-    stroke:         rgba(180, 180, 220, 0.4);
-    stroke-width:   0.5;
-    pointer-events: none;
+.sc-bounds-handle {
+    fill:           white;
+    stroke:         var(--sd-header-bg, #460084);
+    stroke-width:   1.5;
+    pointer-events: all;
 }
 
 
-/* ── Properties panel (right column, edit mode only) ─────────────────────── */
+/* ── Properties column (right, edit mode only) ───────────────────────────── */
 
 .sc-props-col {
     display:        flex;
     flex-direction: column;
-    width:          240px;
+    width:          260px;
     flex-shrink:    0;
     overflow-y:     auto;
     background:     var(--sd-pad-bg, #e8e8e8);
@@ -126,12 +169,10 @@ svg[data-editing="1"] .sc-item:hover > circle {
 }
 
 .sc-props-panel {
-    flex:        1 1 0;
-    display:     flex;
+    display:       flex;
     flex-direction: column;
     border-bottom: 1px solid var(--sd-popup-border, #ccc);
-    min-height:  0;
-    overflow:    hidden;
+    min-height:    0;
 }
 
 .sc-props-header {
@@ -144,9 +185,8 @@ svg[data-editing="1"] .sc-item:hover > circle {
 }
 
 .sc-props-body {
-    flex:           1 1 0;
-    overflow-y:     auto;
-    padding:        8px;
+    overflow-y: auto;
+    padding:    8px;
 }
 
 .sc-props-placeholder {
@@ -176,9 +216,11 @@ svg[data-editing="1"] .sc-item:hover > circle {
 }
 
 
-/* ── Shared form controls ─────────────────────────────────────────────────── */
+/* ── Form controls ───────────────────────────────────────────────────────── */
 
-.sc-input {
+.sc-input,
+.sc-select,
+.sc-textarea {
     width:          100%;
     box-sizing:     border-box;
     padding:        3px 5px;
@@ -188,7 +230,11 @@ svg[data-editing="1"] .sc-item:hover > circle {
     color:          var(--sd-color-text, black);
     font-size:      0.82rem;
 }
-
+.sc-textarea {
+    resize:         vertical;
+    font-family:    monospace;
+    font-size:      0.78rem;
+}
 .sc-input-color {
     width:          48px;
     height:         28px;
@@ -199,32 +245,8 @@ svg[data-editing="1"] .sc-item:hover > circle {
     cursor:         pointer;
 }
 
-.sc-select {
-    width:          100%;
-    box-sizing:     border-box;
-    padding:        3px 5px;
-    border:         1px solid var(--sd-popup-border, #bbb);
-    border-radius:  4px;
-    background:     var(--sd-color-bg, white);
-    color:          var(--sd-color-text, black);
-    font-size:      0.82rem;
-}
 
-.sc-textarea {
-    width:          100%;
-    box-sizing:     border-box;
-    padding:        3px 5px;
-    border:         1px solid var(--sd-popup-border, #bbb);
-    border-radius:  4px;
-    resize:         vertical;
-    font-family:    monospace;
-    font-size:      0.78rem;
-    background:     var(--sd-color-bg, white);
-    color:          var(--sd-color-text, black);
-}
-
-
-/* ── Buttons ──────────────────────────────────────────────────────────────── */
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
 
 .sc-btn {
     padding:        5px 12px;
@@ -234,35 +256,25 @@ svg[data-editing="1"] .sc-item:hover > circle {
     color:          var(--sd-color-text, black);
     cursor:         pointer;
     font-size:      0.85rem;
-    transition:     background 0.1s;
 }
-
-.sc-btn:hover {
-    background: var(--sd-header-btn-bg-hover, #ddd);
-}
+.sc-btn:hover { background: var(--sd-header-btn-bg-hover, #ddd); }
 
 .sc-btn-primary {
-    background:   #3498db;
+    background:   var(--sd-header-bg, #3498db);
     color:        white;
-    border-color: #2980b9;
+    border-color: var(--sd-header-bg, #2980b9);
 }
-
-.sc-btn-primary:hover {
-    background: #2980b9;
-}
+.sc-btn-primary:hover { background: #2980b9; }
 
 .sc-btn-danger {
     background:   #e74c3c;
     color:        white;
     border-color: #c0392b;
 }
-
-.sc-btn-danger:hover {
-    background: #c0392b;
-}
+.sc-btn-danger:hover { background: #c0392b; }
 
 
-/* ── Dialogs ──────────────────────────────────────────────────────────────── */
+/* ── Dialogs ─────────────────────────────────────────────────────────────── */
 
 .sc-dialog {
     border:        1px solid var(--sd-popup-border, #ccc);
@@ -276,17 +288,14 @@ svg[data-editing="1"] .sc-item:hover > circle {
     max-height:    80vh;
     overflow:      auto;
 }
-
-.sc-dialog::backdrop {
-    background: rgba(0, 0, 0, 0.35);
-}
+.sc-dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
 
 .sc-dialog-title {
-    margin:      0;
-    padding:     12px 16px;
-    font-size:   1rem;
+    margin:        0;
+    padding:       12px 16px;
+    font-size:     1rem;
     border-bottom: 1px solid var(--sd-popup-border, #eee);
-    background:  var(--sd-pad-bg, #f0f0f0);
+    background:    var(--sd-pad-bg, #f0f0f0);
     border-radius: 8px 8px 0 0;
 }
 
@@ -308,7 +317,7 @@ svg[data-editing="1"] .sc-item:hover > circle {
 }
 
 
-/* ── Upload dialog specifics ──────────────────────────────────────────────── */
+/* ── Drop zone (legacy SVG upload — kept for future use) ─────────────────── */
 
 .sc-drop-zone {
     border:        2px dashed var(--sd-popup-border, #bbb);
@@ -318,14 +327,11 @@ svg[data-editing="1"] .sc-item:hover > circle {
     cursor:        pointer;
     color:         #888;
     font-size:     0.9rem;
-    transition:    background 0.1s, border-color 0.1s;
 }
-
-.sc-drop-zone:hover,
-.sc-drop-active {
-    background:   rgba(52, 152, 219, 0.07);
-    border-color: #3498db;
-    color:        #3498db;
+.sc-drop-zone:hover, .sc-drop-active {
+    background:   rgba(70, 0, 132, 0.07);
+    border-color: var(--sd-header-bg, #460084);
+    color:        var(--sd-header-bg, #460084);
 }
 
 .sc-upload-feedback {
@@ -334,7 +340,7 @@ svg[data-editing="1"] .sc-item:hover > circle {
 }
 
 
-/* ── File list (open dialog) ──────────────────────────────────────────────── */
+/* ── File list ───────────────────────────────────────────────────────────── */
 
 .sc-file-list {
     border:        1px solid var(--sd-popup-border, #ccc);
@@ -342,24 +348,15 @@ svg[data-editing="1"] .sc-item:hover > circle {
     overflow-y:    auto;
     max-height:    260px;
 }
-
 .sc-file-row {
-    padding:     6px 12px;
-    cursor:      pointer;
-    font-size:   0.88rem;
+    padding:       6px 12px;
+    cursor:        pointer;
+    font-size:     0.88rem;
     border-bottom: 1px solid var(--sd-popup-border, #eee);
-    transition:  background 0.1s;
 }
-
-.sc-file-row:last-child {
-    border-bottom: none;
-}
-
-.sc-file-row:hover {
-    background: var(--sd-table-row-hover, #e0e0e0);
-}
-
+.sc-file-row:last-child { border-bottom: none; }
+.sc-file-row:hover { background: rgba(0,0,0,0.05); }
 .sc-file-row.sc-selected {
-    background:  rgba(52, 152, 219, 0.15);
+    background:  rgba(70, 0, 132, 0.12);
     font-weight: 600;
 }

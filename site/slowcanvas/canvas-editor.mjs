@@ -1,184 +1,193 @@
 // canvas-editor.mjs — interactive SVG viewport for the canvas editor
 // Author: Yao Yin
-// Created: 2026-04-29
 //
 // CanvasEditor manages:
-//   • An <svg> viewport that holds the background SVG and all items.
-//   • Pan (middle-mouse / space+drag) and zoom (wheel).
-//   • Item rendering, selection, drag-to-move, and resize handles.
-//   • Re-export of the current layout as a plain JSON object.
+//   • An <svg> viewport that holds a visual approximation of all items.
+//   • A canvas-bounds rectangle (the "page") that maps to the JSON view_box.
+//   • A snap-to-grid overlay configurable in edit mode.
+//   • Pan (middle-mouse / space+drag) and zoom (wheel) of the editor view.
+//   • Item selection, drag-to-move, corner resize handles.
+//   • Round-tripping of slowdash-canvas JSON layouts.
 //
-// The editor fires custom events on its container element:
-//   sc-item-select  — { detail: { id } }  when an item is selected
-//   sc-item-deselect — fired when the selection is cleared
-//   sc-layout-change — fired after any structural change (move, resize, add, delete)
+// Custom DOM events fired on the container:
+//   sc-item-select   { detail: { _id } }
+//   sc-item-deselect
+//   sc-layout-change   — after any structural change (move/resize/add/delete)
+//   sc-canvas-resize   — after the page dimensions changed (drag or numeric edit)
 
-import { renderItem, updateItemData, getItemChannels, ITEM_REGISTRY } from './canvas-items.mjs';
+import {
+    renderItem, getItemBBox, getItemKey, setItemKey, getItemChannels,
+} from './canvas-items.mjs';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
-// ── CanvasEditor ─────────────────────────────────────────────────────────── //
+const DEFAULT_VIEW = { x: 0, y: 0, width: 1024, height: 768 };
+const DEFAULT_GRID = 20;
+
+// Padding around the canvas bounds (relative to canvas size) so users can pan/zoom.
+const VIEWPORT_PADDING_FACTOR = 0.05;
+
 
 export class CanvasEditor {
-    /**
-     * @param {HTMLElement} container  The host element (gets position:relative).
-     * @param {object}      options    Optional overrides.
-     */
     constructor(container, options = {}) {
         this.container = container;
-        this.options   = options;
+        this.options   = {
+            grid:       options.grid       ?? DEFAULT_GRID,
+            snap:       options.snap       ?? true,
+            showGrid:   options.showGrid   ?? true,
+            ...options,
+        };
 
-        // Runtime state
         this.editing      = false;
-        this.items        = [];          // array of item config objects (source of truth)
+        this.items        = [];                   // source-of-truth array of item configs
         this.selectedId   = null;
-        this.background   = null;        // { file, x, y, width, height }
-        this.viewBox      = { x: 0, y: 0, width: 1200, height: 800 };
+        this.canvas       = { ...DEFAULT_VIEW };  // canvas page bounds (= JSON view_box)
+        this._meta        = {};                   // meta block from loaded layout
+        this._defaults    = {};                   // defaults block
 
-        // Pan/zoom
-        this._pan         = { x: 0, y: 0 };
-        this._zoom        = 1.0;
-        this._dragging    = false;
-        this._dragStart   = null;
-
-        // Item drag
-        this._itemDrag      = null;   // { id, startX, startY, origX, origY }
-        this._resizeDrag    = null;   // { id, handle, startX, startY, orig }
+        this._viewBox     = null;                 // current SVG viewBox (pan/zoom)
 
         this._buildDOM();
         this._bindEvents();
+        this._fitViewport();
     }
 
 
     // ── Public API ───────────────────────────────────────────────────────── //
 
-    /** Switch between view (false) and edit (true) modes. */
     setEditing(editing) {
         this.editing = editing;
         this.svgRoot.setAttribute('data-editing', editing ? '1' : '0');
+        this.gridLayer.style.display     = (editing && this.options.showGrid) ? '' : 'none';
+        this.boundsLayer.style.display   = editing ? '' : 'none';
         this._rerenderAllItems();
         if (!editing) this.deselect();
     }
 
-    /**
-     * Load a full canvas layout object (the JSON from the server).
-     * Replaces all current items and the background.
-     */
-    loadLayout(layout) {
-        const canvas = layout.canvas || {};
-        this.viewBox   = { x: 0, y: 0, width: 1200, height: 800, ...(canvas.viewBox || {}) };
-        this.background = canvas.background || null;
-        this.items      = (layout.items || []).map(i => ({ ...i }));
-
-        this.svgRoot.setAttribute('viewBox',
-            `${this.viewBox.x} ${this.viewBox.y} ${this.viewBox.width} ${this.viewBox.height}`);
-
-        this._applyBackground();
-        this._rerenderAllItems();
-        this._resetViewport();
+    setShowGrid(show) {
+        this.options.showGrid = !!show;
+        this.gridLayer.style.display = (this.editing && show) ? '' : 'none';
     }
 
-    /** Return the current layout as a plain JSON-serialisable object. */
+    setGridSize(size) {
+        const n = parseInt(size);
+        if (!Number.isFinite(n) || n <= 0) return;
+        this.options.grid = n;
+        this._renderGrid();
+    }
+
+    setSnap(snap) { this.options.snap = !!snap; }
+
+    /** Load a slowdash-canvas JSON document. Format: { meta, view_box, items, defaults }. */
+    loadLayout(doc) {
+        this._meta     = doc.meta     || {};
+        this._defaults = doc.defaults || {};
+
+        const vb = _parseViewBox(doc.view_box || doc.viewBox);
+        this.canvas = vb ? { ...vb } : { ...DEFAULT_VIEW };
+
+        // Items are normalised — every item gets a unique editor-local _id.
+        this.items = (doc.items || []).map(_normaliseItem);
+
+        this._rerenderAllItems();
+        this._renderGrid();
+        this._renderBounds();
+        this._fitViewport();
+        // Note: no layout-change event here — only user edits should trigger autosave.
+    }
+
+    /** Return the current layout in slowdash-canvas JSON format. */
     getLayout() {
         return {
-            canvas: {
-                viewBox:    { ...this.viewBox },
-                background: this.background ? { ...this.background } : null,
-                dataRefresh: this.options.dataRefresh || 10,
-            },
-            items: this.items.map(i => ({ ...i })),
+            meta:     { ...this._meta },
+            view_box: `${this.canvas.x} ${this.canvas.y} ${this.canvas.width} ${this.canvas.height}`,
+            defaults: { ...this._defaults },
+            control:  { reload: -1 },           // canvas pages don't need auto reload
+            items:    this.items.map(_serialiseItem),
         };
     }
 
-    /** Set or replace the background SVG. */
-    setBackground(svgFilename, svgText, placement = {}) {
-        this.background = {
-            file:   svgFilename,
-            x:      placement.x      ?? this.viewBox.x,
-            y:      placement.y      ?? this.viewBox.y,
-            width:  placement.width  ?? this.viewBox.width,
-            height: placement.height ?? this.viewBox.height,
-        };
-        this._applyBackground(svgText);
-        this._fireLayoutChange();
-    }
-
-    /** Add a new item from a config object. Returns the new item. */
     addItem(config) {
+        if (!config._id) config._id = 'item-' + Math.random().toString(36).slice(2, 9);
         this.items.push(config);
         this._renderItem(config);
+        this.selectItem(config._id);
         this._fireLayoutChange();
-        this.selectItem(config.id);
         return config;
     }
 
-    /** Remove an item by id. */
     removeItem(id) {
-        this.items = this.items.filter(i => i.id !== id);
+        this.items = this.items.filter(i => i._id !== id);
         const el = this._itemEl(id);
         if (el) el.remove();
-        const handles = this.svgRoot.querySelector(`.sc-handles[data-for="${id}"]`);
-        if (handles) handles.remove();
+        this._clearHandles();
         if (this.selectedId === id) this.deselect();
         this._fireLayoutChange();
     }
 
-    /** Update a property path (e.g. 'style.fill') on an existing item. */
+    /** Update a property by dot-path (e.g. 'attr.x', 'metric.channel'). */
     updateItemProp(id, path, value) {
-        const config = this.items.find(i => i.id === id);
-        if (!config) return;
-        _setPath(config, path, value);
-        this._rerenderItem(id);
+        const cfg = this.items.find(i => i._id === id);
+        if (!cfg) return;
+
+        // Coerce numeric inputs back to numbers
+        if (typeof value === 'string' && /^attr\.(x|y|width|height|rx|ry|stroke-width|font-size)$/.test(path)) {
+            const n = parseFloat(value);
+            if (Number.isFinite(n) && /^attr\.(x|y|width|height|rx|ry|stroke-width)$/.test(path)) {
+                value = n;
+            }
+        }
+        if (typeof value === 'string' && /^metric\.(active-above|active-below)$/.test(path)) {
+            const n = parseFloat(value);
+            if (Number.isFinite(n)) value = n;
+        }
+
+        setItemKey(cfg, path, value);
+        this._renderItem(cfg);
+        if (this.selectedId === id) this._showHandles(id);
         this._fireLayoutChange();
     }
 
-    /** Replace the full config for an item and re-render it. */
-    updateItem(newConfig) {
-        const idx = this.items.findIndex(i => i.id === newConfig.id);
-        if (idx < 0) return;
-        this.items[idx] = { ...newConfig };
-        this._rerenderItem(newConfig.id);
-        this._fireLayoutChange();
-    }
-
-    /** Select an item by id (shows handles in edit mode). */
     selectItem(id) {
-        this.deselect();
+        this._clearHandles();
         this.selectedId = id;
         if (this.editing) this._showHandles(id);
         this.container.dispatchEvent(new CustomEvent('sc-item-select', {
-            bubbles: true, detail: { id },
+            bubbles: true, detail: { _id: id },
         }));
     }
 
-    /** Clear the current selection. */
     deselect() {
         this.selectedId = null;
-        this.svgRoot.querySelectorAll('.sc-handles').forEach(el => el.remove());
+        this._clearHandles();
         this.container.dispatchEvent(new CustomEvent('sc-item-deselect', { bubbles: true }));
     }
 
-    /** Update live data for all data-display items. */
-    updateData(dataPacket) {
-        if (!dataPacket) return;
-        for (const config of this.items) {
-            const channels = getItemChannels(config);
-            if (!channels.length) continue;
-
-            const channel = channels[0];
-            const ts = dataPacket[channel];
-            const [, value] = _lastTX(ts);
-            const status = _channelStatus(config, dataPacket, channel);
-            const g = this._itemEl(config.id);
-            if (g) updateItemData(g, config, value, status);
-        }
+    /** Set the canvas page size. Accepts {x, y, width, height} (any subset). */
+    setCanvasBounds(bounds) {
+        this.canvas = { ...this.canvas, ..._sanitiseBounds(bounds) };
+        this._renderBounds();
+        this._renderGrid();
+        this._fitViewport();
+        this._fireLayoutChange();
+        this.container.dispatchEvent(new CustomEvent('sc-canvas-resize', {
+            bubbles: true, detail: { ...this.canvas },
+        }));
     }
 
-    /** Returns all channel names needed by current items. */
+    getCanvasBounds() { return { ...this.canvas }; }
+
+    /** Snap a value to the grid (no-op if snap disabled or grid is zero). */
+    snap(v) {
+        const g = this.options.grid;
+        if (!this.options.snap || !g) return v;
+        return Math.round(v / g) * g;
+    }
+
     getNeededChannels() {
         const set = new Set();
-        for (const config of this.items) {
-            for (const ch of getItemChannels(config)) set.add(ch);
+        for (const cfg of this.items) {
+            for (const c of getItemChannels(cfg)) set.add(c);
         }
         return [...set];
     }
@@ -193,360 +202,389 @@ export class CanvasEditor {
 
         this.svgRoot = document.createElementNS(SVG_NS, 'svg');
         this.svgRoot.setAttribute('class', 'sc-viewport');
-        this.svgRoot.setAttribute('viewBox', `0 0 ${this.viewBox.width} ${this.viewBox.height}`);
-        this.svgRoot.style.width  = '100%';
-        this.svgRoot.style.height = '100%';
+        this.svgRoot.style.width   = '100%';
+        this.svgRoot.style.height  = '100%';
         this.svgRoot.style.display = 'block';
         this.svgRoot.style.userSelect = 'none';
         this.container.appendChild(this.svgRoot);
 
-        // <g> that receives pan/zoom transform
-        this.viewportG = document.createElementNS(SVG_NS, 'g');
-        this.viewportG.setAttribute('class', 'sc-viewport-g');
-        this.svgRoot.appendChild(this.viewportG);
+        // Layer ordering: bounds (page) → grid → items → handles
+        this.boundsLayer = document.createElementNS(SVG_NS, 'g');
+        this.boundsLayer.setAttribute('class', 'sc-bounds-layer');
+        this.svgRoot.appendChild(this.boundsLayer);
 
-        // Background layer inside the transformed group
-        this.bgLayer = document.createElementNS(SVG_NS, 'g');
-        this.bgLayer.setAttribute('class', 'sc-bg-layer');
-        this.viewportG.appendChild(this.bgLayer);
+        this.gridLayer = document.createElementNS(SVG_NS, 'g');
+        this.gridLayer.setAttribute('class', 'sc-grid-layer');
+        this.gridLayer.style.pointerEvents = 'none';
+        this.svgRoot.appendChild(this.gridLayer);
 
-        // Item layer
         this.itemLayer = document.createElementNS(SVG_NS, 'g');
         this.itemLayer.setAttribute('class', 'sc-item-layer');
-        this.viewportG.appendChild(this.itemLayer);
+        this.svgRoot.appendChild(this.itemLayer);
 
-        // Handle layer (selection / resize handles; stays on top)
         this.handleLayer = document.createElementNS(SVG_NS, 'g');
         this.handleLayer.setAttribute('class', 'sc-handle-layer');
-        this.viewportG.appendChild(this.handleLayer);
+        this.svgRoot.appendChild(this.handleLayer);
 
-        // Transparent hit-rect to capture background clicks
-        const hitRect = document.createElementNS(SVG_NS, 'rect');
-        hitRect.setAttribute('class', 'sc-hit-rect');
-        hitRect.setAttribute('x', this.viewBox.x);
-        hitRect.setAttribute('y', this.viewBox.y);
-        hitRect.setAttribute('width',  this.viewBox.width);
-        hitRect.setAttribute('height', this.viewBox.height);
-        hitRect.setAttribute('fill',   'transparent');
-        hitRect.style.pointerEvents = 'fill';
-        this.bgLayer.insertBefore(hitRect, this.bgLayer.firstChild);
-        this._hitRect = hitRect;
-
-        hitRect.addEventListener('click', (e) => {
-            if (this.editing) this.deselect();
+        // Click on empty area deselects
+        this.svgRoot.addEventListener('click', (e) => {
+            if (!this.editing) return;
+            const tgt = e.target;
+            // Only deselect when the click really hit the bounds rect or empty SVG.
+            if (tgt === this.svgRoot || tgt.classList?.contains('sc-bounds-rect')) {
+                this.deselect();
+            }
         });
     }
 
 
-    // ── Event binding ─────────────────────────────────────────────────────── //
+    // ── Pan + zoom (purely visual, doesn't change canvas bounds) ─────────── //
 
     _bindEvents() {
-        // Zoom
         this.svgRoot.addEventListener('wheel', (e) => {
             e.preventDefault();
-            const factor = e.deltaY < 0 ? 1.1 : 0.9;
+            const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
             const rect   = this.svgRoot.getBoundingClientRect();
-            const cx     = (e.clientX - rect.left) / rect.width  * this.viewBox.width  + this.viewBox.x;
-            const cy     = (e.clientY - rect.top)  / rect.height * this.viewBox.height + this.viewBox.y;
-            const newW   = this.viewBox.width  / factor;
-            const newH   = this.viewBox.height / factor;
-            this.viewBox = {
-                x: cx - (cx - this.viewBox.x) / factor,
-                y: cy - (cy - this.viewBox.y) / factor,
-                width:  newW,
-                height: newH,
+            const cx = (e.clientX - rect.left) / rect.width  * this._viewBox.width  + this._viewBox.x;
+            const cy = (e.clientY - rect.top)  / rect.height * this._viewBox.height + this._viewBox.y;
+            this._viewBox = {
+                x: cx - (cx - this._viewBox.x) / factor,
+                y: cy - (cy - this._viewBox.y) / factor,
+                width:  this._viewBox.width  / factor,
+                height: this._viewBox.height / factor,
             };
             this._applyViewBox();
         }, { passive: false });
 
-        // Pan via middle-mouse drag or space+drag
+        let panStart = null;
         this.svgRoot.addEventListener('mousedown', (e) => {
             if (e.button === 1 || (e.button === 0 && e.getModifierState('Space'))) {
-                this._panStart = { x: e.clientX, y: e.clientY, vb: { ...this.viewBox } };
+                panStart = { x: e.clientX, y: e.clientY, vb: { ...this._viewBox } };
                 e.preventDefault();
             }
         });
         window.addEventListener('mousemove', (e) => {
-            if (!this._panStart) return;
-            const rect  = this.svgRoot.getBoundingClientRect();
-            const scaleX = this.viewBox.width  / rect.width;
-            const scaleY = this.viewBox.height / rect.height;
-            const dx = (e.clientX - this._panStart.x) * scaleX;
-            const dy = (e.clientY - this._panStart.y) * scaleY;
-            this.viewBox = {
-                ...this._panStart.vb,
-                x: this._panStart.vb.x - dx,
-                y: this._panStart.vb.y - dy,
+            if (!panStart) return;
+            const rect = this.svgRoot.getBoundingClientRect();
+            const sx = panStart.vb.width  / rect.width;
+            const sy = panStart.vb.height / rect.height;
+            this._viewBox = {
+                ...panStart.vb,
+                x: panStart.vb.x - (e.clientX - panStart.x) * sx,
+                y: panStart.vb.y - (e.clientY - panStart.y) * sy,
             };
             this._applyViewBox();
         });
-        window.addEventListener('mouseup', () => { this._panStart = null; });
+        window.addEventListener('mouseup', () => { panStart = null; });
+
+        // Re-fit on container resize
+        if (typeof ResizeObserver !== 'undefined') {
+            new ResizeObserver(() => this._applyViewBox()).observe(this.container);
+        }
+    }
+
+    _fitViewport() {
+        const pad = Math.max(this.canvas.width, this.canvas.height) * VIEWPORT_PADDING_FACTOR;
+        this._viewBox = {
+            x: this.canvas.x - pad,
+            y: this.canvas.y - pad,
+            width:  this.canvas.width  + pad * 2,
+            height: this.canvas.height + pad * 2,
+        };
+        this._applyViewBox();
+    }
+
+    _applyViewBox() {
+        if (!this._viewBox) return;
+        const v = this._viewBox;
+        this.svgRoot.setAttribute('viewBox', `${v.x} ${v.y} ${v.width} ${v.height}`);
     }
 
 
-    // ── Item interaction ─────────────────────────────────────────────────── //
+    // ── Canvas bounds (the "page" and its drag handles) ──────────────────── //
 
-    _makeItemInteractive(g, config) {
+    _renderBounds() {
+        this.boundsLayer.innerHTML = '';
+
+        // White page background — items are drawn on top
+        const bg = document.createElementNS(SVG_NS, 'rect');
+        bg.setAttribute('class', 'sc-bounds-rect');
+        bg.setAttribute('x',      this.canvas.x);
+        bg.setAttribute('y',      this.canvas.y);
+        bg.setAttribute('width',  this.canvas.width);
+        bg.setAttribute('height', this.canvas.height);
+        bg.setAttribute('fill',   'white');
+        bg.setAttribute('stroke', '#999');
+        bg.setAttribute('stroke-width', '1');
+        this.boundsLayer.appendChild(bg);
+
         if (!this.editing) return;
 
-        g.style.cursor = 'move';
+        // Corner + edge resize handles for the canvas page
+        const { x, y, width, height } = this.canvas;
+        const handles = [
+            { cx: x + width, cy: y + height, dir: 'se' },
+            { cx: x + width, cy: y,          dir: 'ne' },
+            { cx: x,         cy: y + height, dir: 'sw' },
+            { cx: x,         cy: y,          dir: 'nw' },
+            { cx: x + width / 2, cy: y + height,    dir: 's' },
+            { cx: x + width / 2, cy: y,             dir: 'n' },
+            { cx: x + width,     cy: y + height / 2, dir: 'e' },
+            { cx: x,             cy: y + height / 2, dir: 'w' },
+        ];
+        for (const h of handles) {
+            const r = document.createElementNS(SVG_NS, 'rect');
+            const sz = 10;
+            r.setAttribute('class', 'sc-bounds-handle');
+            r.setAttribute('x', h.cx - sz / 2);
+            r.setAttribute('y', h.cy - sz / 2);
+            r.setAttribute('width',  sz);
+            r.setAttribute('height', sz);
+            r.style.cursor = h.dir + '-resize';
+            r.dataset.dir  = h.dir;
+            this._bindBoundsHandle(r, h.dir);
+            this.boundsLayer.appendChild(r);
+        }
+    }
 
-        g.addEventListener('click', (e) => {
-            e.stopPropagation();
-            this.selectItem(config.id);
-        });
-
-        g.addEventListener('mousedown', (e) => {
+    _bindBoundsHandle(handleEl, dir) {
+        handleEl.addEventListener('mousedown', (e) => {
             if (e.button !== 0) return;
             e.stopPropagation();
             e.preventDefault();
 
-            const rect    = this.svgRoot.getBoundingClientRect();
-            const svgRect = this.svgRoot.viewBox.baseVal;
-            const scaleX  = svgRect.width  / rect.width;
-            const scaleY  = svgRect.height / rect.height;
-
-            this._itemDrag = {
-                id:    config.id,
-                startX: e.clientX,
-                startY: e.clientY,
-                origX:  config.x,
-                origY:  config.y,
-                scaleX, scaleY,
-            };
+            const rect = this.svgRoot.getBoundingClientRect();
+            const sx   = this._viewBox.width  / rect.width;
+            const sy   = this._viewBox.height / rect.height;
+            const orig = { ...this.canvas };
 
             const onMove = (ev) => {
-                if (!this._itemDrag) return;
-                const dx = (ev.clientX - this._itemDrag.startX) * this._itemDrag.scaleX;
-                const dy = (ev.clientY - this._itemDrag.startY) * this._itemDrag.scaleY;
-                const cfg = this.items.find(i => i.id === this._itemDrag.id);
-                if (!cfg) return;
-                cfg.x = Math.round(this._itemDrag.origX + dx);
-                cfg.y = Math.round(this._itemDrag.origY + dy);
-                this._rerenderItem(cfg.id);
-                this._showHandles(cfg.id);
+                const dx = (ev.clientX - e.clientX) * sx;
+                const dy = (ev.clientY - e.clientY) * sy;
+
+                let { x, y, width, height } = orig;
+                if (dir.includes('e')) width  = Math.max(50, this.snap(width  + dx));
+                if (dir.includes('s')) height = Math.max(50, this.snap(height + dy));
+                if (dir.includes('w')) {
+                    const nx = this.snap(x + dx);
+                    width = Math.max(50, width + (x - nx));
+                    x = nx;
+                }
+                if (dir.includes('n')) {
+                    const ny = this.snap(y + dy);
+                    height = Math.max(50, height + (y - ny));
+                    y = ny;
+                }
+                this.canvas = { x, y, width, height };
+                this._renderBounds();
+                this._renderGrid();
             };
 
             const onUp = () => {
-                if (this._itemDrag) {
-                    this._fireLayoutChange();
-                    this._itemDrag = null;
-                }
                 window.removeEventListener('mousemove', onMove);
-                window.removeEventListener('mouseup',  onUp);
+                window.removeEventListener('mouseup',   onUp);
+                this._fireLayoutChange();
+                this.container.dispatchEvent(new CustomEvent('sc-canvas-resize', {
+                    bubbles: true, detail: { ...this.canvas },
+                }));
             };
-
             window.addEventListener('mousemove', onMove);
             window.addEventListener('mouseup',   onUp);
         });
     }
 
 
-    // ── Handles (selection + resize) ─────────────────────────────────────── //
+    // ── Grid overlay ─────────────────────────────────────────────────────── //
+
+    _renderGrid() {
+        this.gridLayer.innerHTML = '';
+        if (!this.options.showGrid || !this.editing) return;
+
+        const step = this.options.grid;
+        if (step <= 0) return;
+
+        const { x, y, width, height } = this.canvas;
+        let d = '';
+        for (let gx = x; gx <= x + width + 0.5; gx += step) {
+            d += `M ${gx} ${y} L ${gx} ${y + height} `;
+        }
+        for (let gy = y; gy <= y + height + 0.5; gy += step) {
+            d += `M ${x} ${gy} L ${x + width} ${gy} `;
+        }
+        const path = document.createElementNS(SVG_NS, 'path');
+        path.setAttribute('d',      d);
+        path.setAttribute('stroke', 'rgba(120,120,200,0.25)');
+        path.setAttribute('stroke-width', '0.5');
+        path.setAttribute('fill',   'none');
+        path.setAttribute('class',  'sc-grid');
+        this.gridLayer.appendChild(path);
+    }
+
+
+    // ── Items ───────────────────────────────────────────────────────────── //
+
+    _rerenderAllItems() {
+        this.itemLayer.innerHTML = '';
+        for (const cfg of this.items) this._renderItem(cfg);
+    }
+
+    _renderItem(config) {
+        const old = this._itemEl(config._id);
+        if (old) old.remove();
+        const g = renderItem(config, this.editing);
+        if (!g) return;
+        this.itemLayer.appendChild(g);
+        if (this.editing) this._makeItemInteractive(g, config);
+    }
+
+    _itemEl(id) {
+        return this.itemLayer.querySelector(`g[data-item-id="${id}"]`);
+    }
+
+    _makeItemInteractive(g, config) {
+        g.style.cursor = 'move';
+
+        g.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.selectItem(config._id);
+        });
+
+        g.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            // If the user clicked on a corner handle the handle's own listener handles it.
+            if (e.target?.classList?.contains('sc-handle')) return;
+            e.stopPropagation();
+            e.preventDefault();
+
+            const rect = this.svgRoot.getBoundingClientRect();
+            const sx   = this._viewBox.width  / rect.width;
+            const sy   = this._viewBox.height / rect.height;
+            const orig = { x: parseFloat(config.attr?.x) || 0, y: parseFloat(config.attr?.y) || 0 };
+
+            const onMove = (ev) => {
+                const dx = (ev.clientX - e.clientX) * sx;
+                const dy = (ev.clientY - e.clientY) * sy;
+                config.attr = config.attr || {};
+                config.attr.x = this.snap(orig.x + dx);
+                config.attr.y = this.snap(orig.y + dy);
+                this._renderItem(config);
+                this._showHandles(config._id);
+            };
+            const onUp = () => {
+                window.removeEventListener('mousemove', onMove);
+                window.removeEventListener('mouseup',   onUp);
+                this._fireLayoutChange();
+            };
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup',   onUp);
+        });
+    }
+
+
+    // ── Selection handles ───────────────────────────────────────────────── //
+
+    _clearHandles() {
+        this.handleLayer.innerHTML = '';
+    }
 
     _showHandles(id) {
-        // Remove old handles for this item
-        this.svgRoot.querySelectorAll(`.sc-handles[data-for="${id}"]`).forEach(el => el.remove());
-
-        const config = this.items.find(i => i.id === id);
+        this._clearHandles();
+        const config = this.items.find(i => i._id === id);
         if (!config) return;
+
+        const bb = getItemBBox(config);
+        const pad = 3;
 
         const hg = document.createElementNS(SVG_NS, 'g');
         hg.setAttribute('class', 'sc-handles');
-        hg.setAttribute('data-for', id);
 
-        const { x, y, width, height } = config;
-        const pad = 4;
-
-        // Dashed selection border
         const border = document.createElementNS(SVG_NS, 'rect');
-        border.setAttribute('x',           x - pad);
-        border.setAttribute('y',           y - pad);
-        border.setAttribute('width',       width  + pad * 2);
-        border.setAttribute('height',      height + pad * 2);
-        border.setAttribute('fill',        'none');
-        border.setAttribute('stroke',      '#0099ff');
+        border.setAttribute('x',      bb.x - pad);
+        border.setAttribute('y',      bb.y - pad);
+        border.setAttribute('width',  bb.width  + pad * 2);
+        border.setAttribute('height', bb.height + pad * 2);
+        border.setAttribute('fill',   'none');
+        border.setAttribute('stroke', '#0099ff');
         border.setAttribute('stroke-width', '1.5');
         border.setAttribute('stroke-dasharray', '5 3');
         border.style.pointerEvents = 'none';
         hg.appendChild(border);
 
-        // Corner resize handles
         const corners = [
-            { cx: x,          cy: y,           dir: 'nw' },
-            { cx: x + width,  cy: y,           dir: 'ne' },
-            { cx: x,          cy: y + height,  dir: 'sw' },
-            { cx: x + width,  cy: y + height,  dir: 'se' },
+            { cx: bb.x,            cy: bb.y,             dir: 'nw' },
+            { cx: bb.x + bb.width, cy: bb.y,             dir: 'ne' },
+            { cx: bb.x,            cy: bb.y + bb.height, dir: 'sw' },
+            { cx: bb.x + bb.width, cy: bb.y + bb.height, dir: 'se' },
         ];
         for (const c of corners) {
-            const h = document.createElementNS(SVG_NS, 'rect');
-            const hs = 8;
-            h.setAttribute('x',      c.cx - hs / 2);
-            h.setAttribute('y',      c.cy - hs / 2);
-            h.setAttribute('width',  hs);
-            h.setAttribute('height', hs);
-            h.setAttribute('fill',   'white');
-            h.setAttribute('stroke', '#0099ff');
-            h.setAttribute('stroke-width', '1.5');
-            h.style.cursor = c.dir + '-resize';
-            h.dataset.dir  = c.dir;
-            this._bindResizeHandle(h, id, config, c.dir);
-            hg.appendChild(h);
+            const r = document.createElementNS(SVG_NS, 'rect');
+            const sz = 8;
+            r.setAttribute('class', 'sc-handle');
+            r.setAttribute('x', c.cx - sz / 2);
+            r.setAttribute('y', c.cy - sz / 2);
+            r.setAttribute('width',  sz);
+            r.setAttribute('height', sz);
+            r.setAttribute('fill', 'white');
+            r.setAttribute('stroke', '#0099ff');
+            r.setAttribute('stroke-width', '1.5');
+            r.style.cursor = c.dir + '-resize';
+            this._bindResizeHandle(r, id, c.dir);
+            hg.appendChild(r);
         }
-
         this.handleLayer.appendChild(hg);
     }
 
-    _bindResizeHandle(h, id, origConfig, dir) {
+    _bindResizeHandle(h, id, dir) {
         h.addEventListener('mousedown', (e) => {
             e.stopPropagation();
             e.preventDefault();
 
-            const rect   = this.svgRoot.getBoundingClientRect();
-            const svgVB  = this.svgRoot.viewBox.baseVal;
-            const scaleX = svgVB.width  / rect.width;
-            const scaleY = svgVB.height / rect.height;
+            const rect = this.svgRoot.getBoundingClientRect();
+            const sx   = this._viewBox.width  / rect.width;
+            const sy   = this._viewBox.height / rect.height;
 
-            const snap = this.options.snap || 1;
-            const drag = {
-                startX: e.clientX,
-                startY: e.clientY,
-                orig:   { x: origConfig.x, y: origConfig.y, width: origConfig.width, height: origConfig.height },
-                scaleX, scaleY, dir,
-            };
+            const cfg = this.items.find(i => i._id === id);
+            if (!cfg) return;
+            const bb0 = getItemBBox(cfg);
 
             const onMove = (ev) => {
-                const dx = (ev.clientX - drag.startX) * drag.scaleX;
-                const dy = (ev.clientY - drag.startY) * drag.scaleY;
-                const cfg = this.items.find(i => i.id === id);
-                if (!cfg) return;
+                const dx = (ev.clientX - e.clientX) * sx;
+                const dy = (ev.clientY - e.clientY) * sy;
 
-                let { x, y, width, height } = drag.orig;
-                if (dir.includes('e')) { width  = Math.max(40, width  + dx); }
-                if (dir.includes('s')) { height = Math.max(20, height + dy); }
-                if (dir.includes('w')) { x = x + dx; width  = Math.max(40, width  - dx); }
+                let { x, y, width, height } = bb0;
+                if (dir.includes('e')) width  = Math.max(20, width  + dx);
+                if (dir.includes('s')) height = Math.max(20, height + dy);
+                if (dir.includes('w')) { x = x + dx; width  = Math.max(20, width  - dx); }
                 if (dir.includes('n')) { y = y + dy; height = Math.max(20, height - dy); }
 
-                cfg.x = Math.round(x / snap) * snap;
-                cfg.y = Math.round(y / snap) * snap;
-                cfg.width  = Math.round(width  / snap) * snap;
-                cfg.height = Math.round(height / snap) * snap;
+                cfg.attr = cfg.attr || {};
+                cfg.attr.x      = this.snap(x);
+                cfg.attr.y      = this.snap(y);
+                cfg.attr.width  = this.snap(width);
+                cfg.attr.height = this.snap(height);
 
-                this._rerenderItem(id);
+                // Special case: text uses x/y as baseline anchor; keep height effective.
+                if (cfg.type === 'text') {
+                    // Approximate baseline shift so resizing visually grows the box.
+                    cfg.attr.y = this.snap(y + height * 0.7);
+                }
+
+                this._renderItem(cfg);
                 this._showHandles(id);
             };
 
             const onUp = () => {
-                this._fireLayoutChange();
                 window.removeEventListener('mousemove', onMove);
                 window.removeEventListener('mouseup',   onUp);
+                this._fireLayoutChange();
             };
-
             window.addEventListener('mousemove', onMove);
             window.addEventListener('mouseup',   onUp);
         });
     }
 
 
-    // ── Rendering helpers ─────────────────────────────────────────────────── //
-
-    _applyBackground(svgText) {
-        this.bgLayer.innerHTML = '';
-
-        // Re-add the hit rect
-        this.bgLayer.appendChild(this._hitRect);
-
-        if (!this.background) return;
-
-        if (svgText) {
-            // Inline SVG embedded in a foreignObject for full fidelity
-            const parser = new DOMParser();
-            const doc    = parser.parseFromString(svgText, 'image/svg+xml');
-            const svgEl  = doc.documentElement;
-
-            // Place it using a nested <svg> with position/size from background config
-            const nested = document.createElementNS(SVG_NS, 'svg');
-            nested.setAttribute('x',      this.background.x);
-            nested.setAttribute('y',      this.background.y);
-            nested.setAttribute('width',  this.background.width);
-            nested.setAttribute('height', this.background.height);
-            nested.setAttribute('class',  'sc-background-svg');
-            nested.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-
-            // Copy viewBox from source SVG if available
-            const vb = svgEl.getAttribute('viewBox');
-            if (vb) nested.setAttribute('viewBox', vb);
-
-            // Move children across
-            while (svgEl.firstChild) nested.appendChild(svgEl.firstChild);
-
-            // Allow background SVG elements to be selected for property editing
-            if (this.editing) {
-                nested.style.cursor = 'default';
-                nested.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    const target = e.target;
-                    if (target !== nested) {
-                        this.container.dispatchEvent(new CustomEvent('sc-svg-element-select', {
-                            bubbles: true, detail: { element: target },
-                        }));
-                    }
-                });
-            }
-
-            this.bgLayer.appendChild(nested);
-            this.background._svgEl = nested;
-        } else if (this.background.file) {
-            // Fall back to <image> if we only have a filename (e.g. after reload)
-            const img = document.createElementNS(SVG_NS, 'image');
-            img.setAttribute('href',   `./api/config/file/${this.background.file}`);
-            img.setAttribute('x',      this.background.x);
-            img.setAttribute('y',      this.background.y);
-            img.setAttribute('width',  this.background.width);
-            img.setAttribute('height', this.background.height);
-            img.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-            this.bgLayer.appendChild(img);
-        }
-    }
-
-    _renderItem(config) {
-        const existing = this._itemEl(config.id);
-        if (existing) existing.remove();
-
-        const g = renderItem(config, this.editing);
-        if (!g) return;
-
-        this.itemLayer.appendChild(g);
-        this._makeItemInteractive(g, config);
-    }
-
-    _rerenderItem(id) {
-        const config = this.items.find(i => i.id === id);
-        if (!config) return;
-        this._renderItem(config);
-        if (this.editing && this.selectedId === id) {
-            this._showHandles(id);
-        }
-    }
-
-    _rerenderAllItems() {
-        this.itemLayer.innerHTML = '';
-        for (const config of this.items) this._renderItem(config);
-    }
-
-    _itemEl(id) {
-        return this.itemLayer.querySelector(`#sc-item-${id.replace(/[^a-z0-9]/gi, '_')}`);
-    }
-
-    _applyViewBox() {
-        this.svgRoot.setAttribute('viewBox',
-            `${this.viewBox.x} ${this.viewBox.y} ${this.viewBox.width} ${this.viewBox.height}`);
-    }
-
-    _resetViewport() {
-        this.viewBox = { x: 0, y: 0, width: this.viewBox.width, height: this.viewBox.height };
-        this._applyViewBox();
-    }
+    // ── Plumbing ─────────────────────────────────────────────────────────── //
 
     _fireLayoutChange() {
         this.container.dispatchEvent(new CustomEvent('sc-layout-change', { bubbles: true }));
@@ -554,38 +592,39 @@ export class CanvasEditor {
 }
 
 
-// ── Utility ──────────────────────────────────────────────────────────────── //
+// ── Helpers ──────────────────────────────────────────────────────────── //
 
-/** Set a nested property by dot-path (e.g. 'style.fill'). */
-function _setPath(obj, path, value) {
-    const parts = path.split('.');
-    let cur = obj;
-    for (let i = 0; i < parts.length - 1; i++) {
-        if (cur[parts[i]] === undefined) cur[parts[i]] = {};
-        cur = cur[parts[i]];
+function _parseViewBox(s) {
+    if (!s) return null;
+    if (typeof s === 'object') return _sanitiseBounds(s);
+    const parts = String(s).trim().split(/[\s,]+/).map(parseFloat);
+    if (parts.length < 4 || parts.some(p => !Number.isFinite(p))) return null;
+    return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
+}
+
+function _sanitiseBounds(b) {
+    const out = {};
+    for (const k of ['x', 'y', 'width', 'height']) {
+        if (b[k] != null) {
+            const n = parseFloat(b[k]);
+            if (Number.isFinite(n)) out[k] = n;
+        }
     }
-    cur[parts[parts.length - 1]] = value;
+    return out;
 }
 
-/** Extract the last [time, value] from a timeseries data packet. */
-function _lastTX(ts) {
-    if (!ts || !ts.t || ts.t.length === 0) return [null, null];
-    const last = ts.t.length - 1;
-    return [ts.t[last], ts.x ? ts.x[last] : null];
+function _normaliseItem(raw) {
+    const cfg = { ...raw };
+    cfg.attr = { ...(raw.attr || {}) };
+    if (raw.metric) cfg.metric = { ...raw.metric };
+    if (raw.action) cfg.action = { ...raw.action };
+    if (!cfg._id) cfg._id = 'item-' + Math.random().toString(36).slice(2, 9);
+    return cfg;
 }
 
-/** Determine channel status from the data packet and item config. */
-function _channelStatus(config, dataPacket, channel) {
-    const ts = dataPacket[channel];
-    if (!ts || !ts.t || ts.t.length === 0) return 'dead';
-
-    const [, value] = _lastTX(ts);
-    if (value === null || value === undefined) return 'dead';
-
-    const above = config['active-above'];
-    const below = config['active-below'];
-    if (above !== undefined && above !== null && value < above) return 'inactive';
-    if (below !== undefined && below !== null && value > below) return 'inactive';
-
-    return 'active';
+function _serialiseItem(cfg) {
+    const out = { type: cfg.type, attr: { ...cfg.attr } };
+    if (cfg.metric && Object.keys(cfg.metric).length) out.metric = { ...cfg.metric };
+    if (cfg.action && Object.keys(cfg.action).length) out.action = { ...cfg.action };
+    return out;
 }

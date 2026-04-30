@@ -1,20 +1,17 @@
-// canvas-dialogs.mjs — dialog boxes for the canvas editor
+// canvas-dialogs.mjs — dialog boxes and side panels for the canvas editor
 // Author: Yao Yin
-// Created: 2026-04-29
 //
-// All dialogs are built with the native <dialog> element (HTML5) and styled
-// via canvas.css.  No external dialog library is required.
+// Native <dialog> + plain CSS. No external dialog library.
 //
-// Exported:
-//   openUploadSVGDialog(onSVGLoaded)   — file picker + paste for SVG upload
-//   openAddItemDialog(types, onAdd)    — choose item type + label
-//   openOpenCanvasDialog(files, onOpen)— pick an existing layout to open
-//   openSaveCanvasDialog(onSave)       — name and save the current layout
-//   openSVGEditorDialog(svgFile)       — launch SVG-Edit in an iframe popup
-//   buildPropertiesPanel(container)    — returns an object with update(config)/clear()
+// Exports:
+//   openOpenCanvasDialog(files, onOpen)
+//   openSaveCanvasDialog(currentName, onSave)
+//   openCanvasSizeDialog(currentBounds, onApply)
+//   buildPropertiesPanel(container, { getPropertyFields })
+//   buildCanvasInspector(container, editor)
 
 
-// ── Utility ─────────────────────────────────────────────────────────────── //
+// ── Generic helpers ─────────────────────────────────────────────────── //
 
 function el(tag, attrs = {}, ...children) {
     const e = document.createElement(tag);
@@ -24,16 +21,13 @@ function el(tag, attrs = {}, ...children) {
         else e.setAttribute(k, v);
     }
     for (const c of children) {
+        if (c == null) continue;
         if (typeof c === 'string') e.appendChild(document.createTextNode(c));
-        else if (c) e.appendChild(c);
+        else e.appendChild(c);
     }
     return e;
 }
 
-/**
- * Open a <dialog> element centred on screen with the given content.
- * Returns a close function.
- */
 function openDialog(title, content, buttons = []) {
     const dlg = el('dialog', { class: 'sc-dialog' });
     dlg.appendChild(el('h3', { class: 'sc-dialog-title' }, title));
@@ -58,129 +52,8 @@ function openDialog(title, content, buttons = []) {
 }
 
 
-// ── SVG Upload dialog ────────────────────────────────────────────────────── //
+// ── Open / Save ─────────────────────────────────────────────────────── //
 
-/**
- * Show a dialog that lets the user pick or drag-drop an SVG file.
- * @param {function} onLoaded  Called with (filename, svgText) when done.
- */
-export function openUploadSVGDialog(onLoaded) {
-    let selectedName = '';
-    let selectedText = '';
-
-    const dropZone = el('div', { class: 'sc-drop-zone' },
-        'Drop an SVG file here, or click to browse'
-    );
-    const fileInput = el('input', { type: 'file', accept: '.svg,image/svg+xml', style: { display: 'none' } });
-    const feedback  = el('div',   { class: 'sc-upload-feedback' });
-    const nameInput = el('input', { type: 'text', class: 'sc-input', placeholder: 'filename (e.g. floor-plan.svg)' });
-
-    const content = el('div', { class: 'sc-dialog-content' },
-        dropZone,
-        fileInput,
-        el('p', {}, 'Filename saved to project config:'),
-        nameInput,
-        feedback
-    );
-
-    // Click to browse
-    dropZone.addEventListener('click', () => fileInput.click());
-    fileInput.addEventListener('change', () => {
-        const file = fileInput.files[0];
-        if (!file) return;
-        _readSVGFile(file, (name, text) => {
-            selectedName = nameInput.value || name;
-            nameInput.value = selectedName;
-            selectedText = text;
-            feedback.textContent = `Loaded: ${name} (${(text.length/1024).toFixed(1)} KB)`;
-            feedback.style.color = 'var(--sd-color-text, green)';
-        });
-    });
-
-    // Drag-drop
-    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('sc-drop-active'); });
-    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('sc-drop-active'));
-    dropZone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        dropZone.classList.remove('sc-drop-active');
-        const file = e.dataTransfer.files[0];
-        if (file) {
-            _readSVGFile(file, (name, text) => {
-                selectedName = nameInput.value || name;
-                nameInput.value = selectedName;
-                selectedText = text;
-                feedback.textContent = `Loaded: ${name}`;
-                feedback.style.color = 'green';
-            });
-        }
-    });
-
-    openDialog('Upload SVG Background', content, [
-        {
-            label: 'Load SVG', primary: true,
-            action: () => {
-                if (!selectedText) { feedback.textContent = 'No file selected.'; return true; }
-                const fname = (nameInput.value || selectedName).replace(/[^a-zA-Z0-9._-]/g, '_');
-                onLoaded(fname, selectedText);
-                return false; // close
-            },
-        },
-        { label: 'Cancel', action: () => false },
-    ]);
-}
-
-function _readSVGFile(file, cb) {
-    const reader = new FileReader();
-    reader.onload = (ev) => cb(file.name, ev.target.result);
-    reader.readAsText(file);
-}
-
-
-// ── Add Item dialog ──────────────────────────────────────────────────────── //
-
-/**
- * Show a dialog to choose an item type.
- * @param {object}   typeDescriptors  Map of { type: { label } }.
- * @param {function} onAdd            Called with { type, label } when done.
- */
-export function openAddItemDialog(typeDescriptors, onAdd) {
-    const select = el('select', { class: 'sc-select' });
-    for (const [type, desc] of Object.entries(typeDescriptors)) {
-        const opt = el('option', { value: type }, desc.label || type);
-        select.appendChild(opt);
-    }
-
-    const labelInput = el('input', {
-        type: 'text', class: 'sc-input',
-        placeholder: 'Label text (can be changed later)',
-    });
-
-    const content = el('div', { class: 'sc-dialog-content' },
-        el('label', {}, 'Item type:'),
-        select,
-        el('label', {}, 'Label:'),
-        labelInput
-    );
-
-    openDialog('Add Item', content, [
-        {
-            label: 'Add', primary: true,
-            action: () => {
-                onAdd({ type: select.value, label: labelInput.value || undefined });
-                return false;
-            },
-        },
-        { label: 'Cancel', action: () => false },
-    ]);
-}
-
-
-// ── Open Canvas dialog ───────────────────────────────────────────────────── //
-
-/**
- * @param {object[]} files   Array of { name, file, mtime } from CanvasAPI.listFiles().
- * @param {function} onOpen  Called with the selected filename.
- */
 export function openOpenCanvasDialog(files, onOpen) {
     if (!files.length) {
         alert('No saved canvas layouts found.\nSave a layout first using the Save button.');
@@ -191,11 +64,20 @@ export function openOpenCanvasDialog(files, onOpen) {
     let chosen = null;
 
     for (const f of files) {
-        const row = el('div', { class: 'sc-file-row' }, f.name.replace(/^slowcanvas-/, '').replace(/\.json$/, ''));
+        const display = String(f.name)
+            .replace(/^slowdash-/, '')
+            .replace(/\.json$/, '');
+        const row = el('div', { class: 'sc-file-row' }, display);
         row.addEventListener('click', () => {
             list.querySelectorAll('.sc-file-row').forEach(r => r.classList.remove('sc-selected'));
             row.classList.add('sc-selected');
             chosen = f.name;
+        });
+        row.addEventListener('dblclick', () => {
+            chosen = f.name;
+            onOpen(chosen);
+            const dlg = list.closest('dialog');
+            if (dlg) { dlg.close(); dlg.remove(); }
         });
         list.appendChild(row);
     }
@@ -205,42 +87,24 @@ export function openOpenCanvasDialog(files, onOpen) {
     openDialog('Open Canvas', content, [
         {
             label: 'Open', primary: true,
-            action: () => {
-                if (!chosen) { return true; }
-                onOpen(chosen);
-                return false;
-            },
+            action: () => { if (!chosen) return true; onOpen(chosen); return false; },
         },
         { label: 'Cancel', action: () => false },
     ]);
 }
 
-
-// ── Save Canvas dialog ───────────────────────────────────────────────────── //
-
-/**
- * @param {string}   currentName  Pre-fill the name input.
- * @param {function} onSave       Called with the chosen name string.
- */
 export function openSaveCanvasDialog(currentName, onSave) {
-    const nameInput = el('input', {
-        type: 'text', class: 'sc-input',
-        value: currentName || '',
-        placeholder: 'MyCanvas',
-    });
-    const titleInput = el('input', {
-        type: 'text', class: 'sc-input',
-        placeholder: 'Canvas title (optional)',
-    });
-    const feedback = el('div', { class: 'sc-upload-feedback' });
+    const nameInput  = el('input', { type: 'text', class: 'sc-input',
+        value: currentName || '', placeholder: 'MyCanvas' });
+    const titleInput = el('input', { type: 'text', class: 'sc-input',
+        placeholder: 'Canvas title (optional)' });
+    const feedback   = el('div',   { class: 'sc-upload-feedback' });
 
     const content = el('div', { class: 'sc-dialog-content' },
-        el('label', {}, 'Layout name (used in URL):'),
-        nameInput,
-        el('label', {}, 'Title:'),
-        titleInput,
+        el('label', {}, 'Layout name (used in URL):'), nameInput,
+        el('label', {}, 'Title:'),                     titleInput,
         el('p', { style: { fontSize: '0.85em', color: '#888' } },
-            'Saved as slowcanvas-NAME.json in the project config directory.'),
+            'Saved as slowdash-NAME.json so it can be viewed by slowdash.html.'),
         feedback
     );
 
@@ -249,11 +113,7 @@ export function openSaveCanvasDialog(currentName, onSave) {
             label: 'Save', primary: true,
             action: () => {
                 const name = nameInput.value.trim().replace(/[^a-zA-Z0-9_-]/g, '-');
-                if (!name) {
-                    feedback.textContent = 'Please enter a name.';
-                    feedback.style.color = 'red';
-                    return true;
-                }
+                if (!name) { feedback.textContent = 'Please enter a name.'; feedback.style.color = 'red'; return true; }
                 onSave(name, titleInput.value.trim());
                 return false;
             },
@@ -263,168 +123,152 @@ export function openSaveCanvasDialog(currentName, onSave) {
 }
 
 
-// ── SVG Editor dialog (SVG-Edit integration) ─────────────────────────────── //
+// ── Canvas size dialog ──────────────────────────────────────────────── //
 
-/**
- * Open the SVG-Edit iframe editor (requires SVG-Edit to be installed under lib/svgedit/).
- * Falls back to a helpful message if not installed.
- * @param {string} svgFilename  Filename of the SVG in the config directory.
- */
-export function openSVGEditorDialog(svgFilename) {
-    // Detect whether SVG-Edit is installed at the expected path
-    const editorBase = './slowcanvas/svgedit/editor/index.html';
-
-    // We do a quick HEAD check; if it fails we show instructions instead.
-    fetch(editorBase, { method: 'HEAD' })
-        .then(r => {
-            if (r.ok) {
-                _openSVGEditIframe(editorBase, svgFilename);
-            } else {
-                _showSVGEditorNotInstalled();
-            }
-        })
-        .catch(() => _showSVGEditorNotInstalled());
-}
-
-function _openSVGEditIframe(editorBase, svgFilename) {
-    const svgUrl = encodeURIComponent(`./api/config/file/${svgFilename}`);
-    const editorUrl = `${editorBase}?url=${svgUrl}`;
-
-    const iframe = el('iframe', {
-        src: editorUrl,
-        style: { width: '100%', height: '70vh', border: 'none', borderRadius: '6px' },
+export function openCanvasSizeDialog(current, onApply) {
+    const wInput = el('input', { type: 'number', class: 'sc-input', value: current.width  || 1024, min: 50 });
+    const hInput = el('input', { type: 'number', class: 'sc-input', value: current.height || 768,  min: 50 });
+    const presets = [
+        { label: '1024 × 768 (default)', w: 1024, h: 768 },
+        { label: '1280 × 720 (HD)',      w: 1280, h: 720 },
+        { label: '1920 × 1080 (FHD)',    w: 1920, h: 1080 },
+        { label: '800 × 600',            w: 800,  h: 600 },
+        { label: '640 × 480',            w: 640,  h: 480 },
+    ];
+    const presetSel = el('select', { class: 'sc-select' });
+    presetSel.appendChild(el('option', { value: '' }, 'Choose preset…'));
+    for (const p of presets) {
+        const o = el('option', { value: `${p.w}x${p.h}` }, p.label);
+        presetSel.appendChild(o);
+    }
+    presetSel.addEventListener('change', () => {
+        const v = presetSel.value;
+        if (!v) return;
+        const [w, h] = v.split('x').map(Number);
+        wInput.value = w; hInput.value = h;
     });
-    const note = el('p', { style: { fontSize: '0.85em', color: '#888', margin: '0.4em 0 0' } },
-        'Save in SVG-Edit to write back to the project config directory.  ' +
-        'Close this window and click "Reload SVG" to see changes.'
-    );
-    const content = el('div', {}, iframe, note);
 
-    openDialog(`Edit SVG — ${svgFilename}`, content, [
-        { label: 'Close', action: () => false },
-    ]);
-}
-
-function _showSVGEditorNotInstalled() {
     const content = el('div', { class: 'sc-dialog-content' },
-        el('p', {}, 'SVG-Edit is not installed.'),
-        el('p', {}, 'To install it, run:'),
-        el('pre', { style: { background: '#f0f0f0', padding: '0.5em', borderRadius: '4px' } },
-            'cd slowdash-canvas/lib/svgedit\nbash download.sh'
-        ),
-        el('p', {}, 'Then restart slowdash.'),
-        el('hr', {}),
-        el('p', {}, 'Alternatively, edit your SVG with any external editor (Inkscape, Illustrator, etc.) ' +
-            'and re-upload it with the "Upload SVG" button.')
+        el('label', {}, 'Preset:'),  presetSel,
+        el('label', {}, 'Width:'),   wInput,
+        el('label', {}, 'Height:'),  hInput,
     );
-    openDialog('SVG Editor Not Available', content, [
-        { label: 'OK', action: () => false },
+
+    openDialog('Canvas Size', content, [
+        {
+            label: 'Apply', primary: true,
+            action: () => {
+                const w = parseFloat(wInput.value);
+                const h = parseFloat(hInput.value);
+                if (!Number.isFinite(w) || !Number.isFinite(h) || w < 50 || h < 50) return true;
+                onApply({ width: w, height: h });
+                return false;
+            },
+        },
+        { label: 'Cancel', action: () => false },
     ]);
 }
 
 
-// ── Properties Panel ─────────────────────────────────────────────────────── //
+// ── Properties panel (per-item) ─────────────────────────────────────── //
 
-/**
- * Build an inline properties panel inside a container element.
- * Returns an object with:
- *   .show(config, onChange)  — populate the panel for the given item config
- *   .clear()                 — show the "no selection" placeholder
- */
-export function buildPropertiesPanel(container, { ITEM_REGISTRY, getPropertyFields }) {
+export function buildPropertiesPanel(container, { getPropertyFields }) {
     container.innerHTML = '';
-    container.className = 'sc-props-panel';
+    container.classList.add('sc-props-panel');
 
-    const header     = el('div', { class: 'sc-props-header' }, 'Properties');
-    const body       = el('div', { class: 'sc-props-body' });
-    const placeholder = el('div', { class: 'sc-props-placeholder' }, 'Select an item to edit its properties.');
+    const header      = el('div', { class: 'sc-props-header' }, 'Item Properties');
+    const body        = el('div', { class: 'sc-props-body' });
+    const placeholder = el('div', { class: 'sc-props-placeholder' },
+        'Select an item to edit its properties.');
 
     container.appendChild(header);
     container.appendChild(body);
     body.appendChild(placeholder);
 
-    let _onChangeCb = null;
     let _currentConfig = null;
+    let _onChange      = null;
 
     function show(config, onChange) {
         _currentConfig = config;
-        _onChangeCb    = onChange;
+        _onChange      = onChange;
         body.innerHTML = '';
 
-        const fields = getPropertyFields(config.type);
+        const fields = getPropertyFields(config.type) || [];
         if (!fields.length) {
-            body.appendChild(el('div', { class: 'sc-props-placeholder' }, 'No editable properties.'));
+            body.appendChild(el('div', { class: 'sc-props-placeholder' },
+                'No editable properties for this type.'));
             return;
         }
 
         const form = el('div', { class: 'sc-props-form' });
 
+        // Type label at the top
+        form.appendChild(el('div', { class: 'sc-props-row' },
+            el('span', { style: { color: '#888', fontFamily: 'monospace', fontSize: '0.85em' } },
+                config.type)
+        ));
+
         for (const field of fields) {
             const row   = el('div', { class: 'sc-props-row' });
-            const label = el('label', { class: 'sc-props-label' }, field.label);
-            row.appendChild(label);
+            row.appendChild(el('label', { class: 'sc-props-label' }, field.label));
 
             const current = _getPath(config, field.key);
 
             if (field.type === 'color') {
-                const colorInput = el('input', { type: 'color', class: 'sc-input-color',
-                    value: current || '#888888' });
-                colorInput.addEventListener('input', () => _onChange(field.key, colorInput.value));
-                row.appendChild(colorInput);
+                const input = el('input', { type: 'color', class: 'sc-input-color',
+                    value: _toHex(current) || '#888888' });
+                input.addEventListener('input', () => emit(field.key, input.value));
+                row.appendChild(input);
             } else if (field.type === 'select' && field.options) {
                 const sel = el('select', { class: 'sc-select' });
+                sel.appendChild(el('option', { value: '' }, '—'));
                 for (const opt of field.options) {
                     const o = el('option', { value: opt }, opt);
                     if (opt === current) o.selected = true;
                     sel.appendChild(o);
                 }
-                sel.addEventListener('change', () => _onChange(field.key, sel.value));
+                sel.addEventListener('change', () => emit(field.key, sel.value));
                 row.appendChild(sel);
             } else if (field.type === 'textarea') {
-                const ta = el('textarea', { class: 'sc-textarea',
-                    placeholder: field.placeholder || '',
-                    rows: 3 });
-                ta.value = typeof current === 'object' ? JSON.stringify(current, null, 2) : (current || '');
+                const ta = el('textarea', { class: 'sc-textarea', rows: 3,
+                    placeholder: field.placeholder || '' });
+                ta.value = (current && typeof current === 'object')
+                    ? JSON.stringify(current, null, 2) : (current ?? '');
                 ta.addEventListener('change', () => {
-                    try {
-                        _onChange(field.key, JSON.parse(ta.value));
-                    } catch { _onChange(field.key, ta.value); }
+                    try { emit(field.key, JSON.parse(ta.value)); }
+                    catch { emit(field.key, ta.value); }
                 });
                 row.appendChild(ta);
             } else if (field.type === 'checkbox') {
-                const cb = el('input', { type: 'checkbox', class: 'sc-checkbox' });
+                const cb = el('input', { type: 'checkbox' });
                 cb.checked = !!current;
-                cb.addEventListener('change', () => _onChange(field.key, cb.checked));
+                cb.addEventListener('change', () => emit(field.key, cb.checked));
                 row.appendChild(cb);
             } else {
-                // text | number
                 const input = el('input', {
                     type: field.type || 'text',
                     class: 'sc-input',
                     placeholder: field.placeholder || '',
-                    value: current !== undefined ? current : '',
                 });
+                if (current !== undefined && current !== null) input.value = current;
                 input.addEventListener('change', () => {
-                    const v = field.type === 'number' ? parseFloat(input.value) : input.value;
-                    _onChange(field.key, v);
+                    const v = (field.type === 'number') ? parseFloat(input.value) : input.value;
+                    emit(field.key, v);
                 });
                 row.appendChild(input);
             }
-
             form.appendChild(row);
         }
 
-        // Delete button at the bottom
-        const delBtn = el('button', { class: 'sc-btn sc-btn-danger', style: { marginTop: '12px', width: '100%' } },
-            'Delete Item');
+        const delBtn = el('button', { class: 'sc-btn sc-btn-danger',
+            style: { marginTop: '12px', width: '100%' } }, 'Delete item');
         delBtn.addEventListener('click', () => {
-            if (confirm(`Delete item "${config.label || config.id}"?`)) {
+            if (confirm('Delete this item?')) {
                 container.dispatchEvent(new CustomEvent('sc-props-delete', {
-                    bubbles: true, detail: { id: config.id },
+                    bubbles: true, detail: { _id: config._id },
                 }));
             }
         });
-
         form.appendChild(delBtn);
         body.appendChild(form);
     }
@@ -435,92 +279,112 @@ export function buildPropertiesPanel(container, { ITEM_REGISTRY, getPropertyFiel
         body.appendChild(placeholder);
     }
 
-    function _onChange(path, value) {
-        if (!_currentConfig || !_onChangeCb) return;
-        _onChangeCb(path, value);
+    function emit(path, value) {
+        if (!_currentConfig || !_onChange) return;
+        _onChange(path, value);
     }
 
     return { show, clear };
 }
 
 
-// ── SVG Element Properties Panel ─────────────────────────────────────────── //
+// ── Canvas inspector (size + grid) ──────────────────────────────────── //
 
-/**
- * Build a secondary panel for editing SVG element properties inline
- * (fill, stroke, opacity, text content).
- * Returns { show(svgElement), clear() }.
- */
-export function buildSVGElementPanel(container) {
+export function buildCanvasInspector(container, editor) {
     container.innerHTML = '';
-    container.className = 'sc-props-panel';
+    container.classList.add('sc-props-panel');
 
-    const header      = el('div', { class: 'sc-props-header' }, 'SVG Element');
-    const body        = el('div', { class: 'sc-props-body' });
-    const placeholder = el('div', { class: 'sc-props-placeholder' },
-        'Click an element in the background SVG to edit its properties.');
-
+    const header = el('div', { class: 'sc-props-header' }, 'Canvas');
+    const body   = el('div', { class: 'sc-props-body' });
     container.appendChild(header);
     container.appendChild(body);
-    body.appendChild(placeholder);
 
-    function show(svgEl) {
-        body.innerHTML = '';
-        const tag   = svgEl.tagName.toLowerCase();
-        const form  = el('div', { class: 'sc-props-form' });
+    const form = el('div', { class: 'sc-props-form' });
 
-        // Tag info
-        form.appendChild(el('div', { class: 'sc-props-row' },
-            el('span', { style: { color: '#888', fontFamily: 'monospace' } }, `<${tag}>`)
-        ));
+    const wInput = _numberRow(form, 'Canvas width',  editor.canvas.width,
+        v => editor.setCanvasBounds({ width:  v }));
+    const hInput = _numberRow(form, 'Canvas height', editor.canvas.height,
+        v => editor.setCanvasBounds({ height: v }));
 
-        const attr_rows = [
-            { attr: 'fill',         label: 'Fill',         type: 'color'  },
-            { attr: 'stroke',       label: 'Stroke',       type: 'color'  },
-            { attr: 'stroke-width', label: 'Stroke width', type: 'number' },
-            { attr: 'opacity',      label: 'Opacity',      type: 'number' },
-        ];
+    const xInput = _numberRow(form, 'Canvas X', editor.canvas.x,
+        v => editor.setCanvasBounds({ x: v }));
+    const yInput = _numberRow(form, 'Canvas Y', editor.canvas.y,
+        v => editor.setCanvasBounds({ y: v }));
 
-        for (const { attr, label, type } of attr_rows) {
-            const current = svgEl.getAttribute(attr) || (type === 'color' ? '#000000' : '');
-            const row     = el('div', { class: 'sc-props-row' });
-            row.appendChild(el('label', { class: 'sc-props-label' }, label));
+    // Grid step
+    const gInput = _numberRow(form, 'Grid step', editor.options.grid,
+        v => editor.setGridSize(v));
 
-            const input = el('input', {
-                type,
-                class: type === 'color' ? 'sc-input-color' : 'sc-input',
-                value: current,
-            });
-            input.addEventListener('input', () => svgEl.setAttribute(attr, input.value));
-            row.appendChild(input);
-            form.appendChild(row);
-        }
+    // Snap toggle
+    const snapRow = el('div', { class: 'sc-props-row' });
+    snapRow.appendChild(el('label', { class: 'sc-props-label' }, 'Snap to grid'));
+    const snapCb  = el('input', { type: 'checkbox' });
+    snapCb.checked = !!editor.options.snap;
+    snapCb.addEventListener('change', () => editor.setSnap(snapCb.checked));
+    snapRow.appendChild(snapCb);
+    form.appendChild(snapRow);
 
-        // Text content (for text/tspan elements)
-        if (['text', 'tspan'].includes(tag)) {
-            const row   = el('div', { class: 'sc-props-row' });
-            row.appendChild(el('label', { class: 'sc-props-label' }, 'Text'));
-            const ta = el('textarea', { class: 'sc-textarea', rows: 2 });
-            ta.value = svgEl.textContent;
-            ta.addEventListener('change', () => { svgEl.textContent = ta.value; });
-            row.appendChild(ta);
-            form.appendChild(row);
-        }
+    // Show-grid toggle
+    const showRow = el('div', { class: 'sc-props-row' });
+    showRow.appendChild(el('label', { class: 'sc-props-label' }, 'Show grid'));
+    const showCb  = el('input', { type: 'checkbox' });
+    showCb.checked = !!editor.options.showGrid;
+    showCb.addEventListener('change', () => editor.setShowGrid(showCb.checked));
+    showRow.appendChild(showCb);
+    form.appendChild(showRow);
 
-        body.appendChild(form);
-    }
+    body.appendChild(form);
 
-    function clear() {
-        body.innerHTML = '';
-        body.appendChild(placeholder);
-    }
+    // Keep inputs in sync if the editor changes the canvas via dragging
+    editor.container.addEventListener('sc-canvas-resize', (e) => {
+        const c = e.detail || editor.canvas;
+        wInput.value = Math.round(c.width);
+        hInput.value = Math.round(c.height);
+        xInput.value = Math.round(c.x);
+        yInput.value = Math.round(c.y);
+    });
 
-    return { show, clear };
+    return {
+        refresh() {
+            wInput.value = Math.round(editor.canvas.width);
+            hInput.value = Math.round(editor.canvas.height);
+            xInput.value = Math.round(editor.canvas.x);
+            yInput.value = Math.round(editor.canvas.y);
+            gInput.value = editor.options.grid;
+            snapCb.checked = !!editor.options.snap;
+            showCb.checked = !!editor.options.showGrid;
+        },
+    };
+}
+
+function _numberRow(parent, label, initial, onChange) {
+    const row = el('div', { class: 'sc-props-row' });
+    row.appendChild(el('label', { class: 'sc-props-label' }, label));
+    const input = el('input', { type: 'number', class: 'sc-input', step: 'any' });
+    input.value = Math.round(initial ?? 0);
+    input.addEventListener('change', () => {
+        const n = parseFloat(input.value);
+        if (Number.isFinite(n)) onChange(n);
+    });
+    row.appendChild(input);
+    parent.appendChild(row);
+    return input;
 }
 
 
-// ── Utility ─────────────────────────────────────────────────────────────── //
+// ── Path helpers ────────────────────────────────────────────────────── //
 
 function _getPath(obj, path) {
     return path.split('.').reduce((o, k) => (o && o[k] !== undefined ? o[k] : undefined), obj);
+}
+
+/** Best-effort conversion to "#rrggbb" so <input type=color> stays legal. */
+function _toHex(v) {
+    if (!v || typeof v !== 'string') return '';
+    const s = v.trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
+    if (/^#[0-9a-fA-F]{3}$/.test(s)) {
+        return '#' + s.slice(1).split('').map(c => c + c).join('').toLowerCase();
+    }
+    return '';
 }
