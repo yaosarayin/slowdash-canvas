@@ -7,6 +7,7 @@
 //   openOpenCanvasDialog(files, onOpen)
 //   openSaveCanvasDialog(currentName, onSave)
 //   openCanvasSizeDialog(currentBounds, onApply)
+//   openImageDialog(api, onPicked)
 //   buildPropertiesPanel(container, { getPropertyFields })
 //   buildCanvasInspector(container, editor)
 
@@ -167,6 +168,139 @@ export function openCanvasSizeDialog(current, onApply) {
         },
         { label: 'Cancel', action: () => false },
     ]);
+}
+
+
+// ── Image picker / SVG uploader ─────────────────────────────────────── //
+
+/**
+ * Pick an image source for an Image item: either upload a new SVG file (which
+ * gets stored in the project config dir as an `svg-NAME.svg` file) or type
+ * the filename of one that already lives there.
+ *
+ * Only SVG files are accepted — anything else is rejected with a clear message
+ * since the canvas only renders inline SVG safely.
+ *
+ * @param {object}   api        CanvasAPI namespace (passed in to avoid a circular import).
+ * @param {function} onPicked   Called with the chosen filename (string) when done.
+ */
+export function openImageDialog(api, onPicked) {
+    let pickedFile  = null;
+    let pickedText  = null;
+
+    const drop = el('div', { class: 'sc-drop-zone' },
+        'Drop an SVG file here, or click to browse.'
+    );
+    const fileInput = el('input', { type: 'file', accept: '.svg,image/svg+xml',
+        style: { display: 'none' } });
+    const feedback  = el('div', { class: 'sc-upload-feedback' });
+    const nameInput = el('input', { type: 'text', class: 'sc-input',
+        placeholder: 'svg-FloorPlan.svg' });
+
+    const note = el('p', { style: { fontSize: '0.85em', color: '#777', margin: 0 } },
+        'Only .svg files are accepted. Uploaded files are saved into the project ',
+        'config directory and can be referenced by name later.');
+
+    const content = el('div', { class: 'sc-dialog-content' },
+        drop, fileInput,
+        el('label', {}, 'Or use an existing file:'),
+        nameInput,
+        note,
+        feedback
+    );
+
+    function isSvg(file) {
+        if (!file) return false;
+        const ok = (file.type === 'image/svg+xml') || /\.svg$/i.test(file.name);
+        return ok;
+    }
+
+    function consumeFile(file) {
+        if (!isSvg(file)) {
+            pickedFile = pickedText = null;
+            feedback.textContent = `Rejected: "${file?.name || 'unknown'}" is not an SVG. Only .svg files are accepted.`;
+            feedback.style.color = '#c0392b';
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            pickedFile = file;
+            pickedText = ev.target.result;
+            const proposed = (nameInput.value.trim() || _suggestSvgName(file.name));
+            nameInput.value = proposed;
+            feedback.textContent = `Loaded "${file.name}" (${(pickedText.length / 1024).toFixed(1)} KB) — will save as "${proposed}".`;
+            feedback.style.color = '#2ecc71';
+        };
+        reader.onerror = () => {
+            feedback.textContent = `Could not read "${file.name}".`;
+            feedback.style.color = '#c0392b';
+        };
+        reader.readAsText(file);
+    }
+
+    drop.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => consumeFile(fileInput.files[0]));
+
+    drop.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        drop.classList.add('sc-drop-active');
+    });
+    drop.addEventListener('dragleave', () => drop.classList.remove('sc-drop-active'));
+    drop.addEventListener('drop', (e) => {
+        e.preventDefault();
+        drop.classList.remove('sc-drop-active');
+        consumeFile(e.dataTransfer.files[0]);
+    });
+
+    openDialog('Add Image', content, [
+        {
+            label: 'Add', primary: true,
+            action: async () => {
+                const typed = nameInput.value.trim();
+
+                // Path 1: file picked → upload + use that filename.
+                if (pickedFile && pickedText) {
+                    const filename = (typed || _suggestSvgName(pickedFile.name))
+                        .replace(/[^a-zA-Z0-9._-]/g, '_');
+                    if (!/\.svg$/i.test(filename)) {
+                        feedback.textContent = 'Filename must end in .svg.';
+                        feedback.style.color = '#c0392b';
+                        return true;
+                    }
+                    try {
+                        await api.uploadSVG(filename, pickedText);
+                    } catch (e) {
+                        feedback.textContent = `Upload failed: ${e.message}`;
+                        feedback.style.color = '#c0392b';
+                        return true;
+                    }
+                    onPicked(filename);
+                    return false;
+                }
+
+                // Path 2: only a filename typed — reference an existing file.
+                if (typed) {
+                    if (!/\.svg$/i.test(typed)) {
+                        feedback.textContent = 'Only .svg files are supported.';
+                        feedback.style.color = '#c0392b';
+                        return true;
+                    }
+                    onPicked(typed);
+                    return false;
+                }
+
+                feedback.textContent = 'Drop an SVG file or type an existing filename.';
+                feedback.style.color = '#c0392b';
+                return true;
+            },
+        },
+        { label: 'Cancel', action: () => false },
+    ]);
+}
+
+function _suggestSvgName(originalName) {
+    const base = (originalName || 'image.svg').replace(/\.svg$/i, '');
+    return 'svg-' + base.replace(/[^a-zA-Z0-9._-]/g, '_') + '.svg';
 }
 
 

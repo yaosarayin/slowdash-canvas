@@ -58,12 +58,52 @@ html, body {
     text-transform: uppercase;
 }
 
+.sc-preview-wrap {
+    flex:       1 1 0;
+    min-height: 0;
+    display:    flex;
+}
+
 .sc-preview-iframe {
     flex:    1 1 0;
     min-height: 0;
     width:   100%;
     border:  none;
     background: white;
+}
+
+/* JSON pane (toggleable, shown below the live preview) */
+.sc-json-hdr {
+    display:         flex;
+    align-items:     center;
+    justify-content: space-between;
+}
+.sc-mini-btn {
+    border:          1px solid var(--sd-popup-border, #bbb);
+    border-radius:   4px;
+    background:      var(--sd-color-bg, white);
+    color:           var(--sd-color-text, #333);
+    cursor:          pointer;
+    font-size:       0.78rem;
+    padding:         2px 8px;
+    text-transform:  none;
+    letter-spacing:  0;
+    line-height:     1.4;
+}
+.sc-mini-btn:hover { background: var(--sd-table-row-hover, #ddd); }
+
+.sc-json-panel {
+    flex:        0 0 40%;
+    min-height:  120px;
+    display:     flex;
+    flex-direction: column;
+    border-top:  1px solid var(--sd-popup-border, #ccc);
+    background:  #ffffff;
+}
+.sc-json-host {
+    flex:    1 1 0;
+    min-height: 0;
+    width:   100%;
 }
 
 

@@ -1,20 +1,19 @@
 // canvas-app.mjs — SlowDash Canvas Editor entry point
 // Author: Yao Yin
 //
-// Split-panel layout:
-//   ┌──────────── header (purple, slowdash Frame) ───────────┐
-//   │  edit ▸ │ live preview (slowdash.html iframe)  │ tools │
-//   │  view ▸ │                                       │ +    │
-//   │         │                                       │ props│
-//   └─────────┴───────────────────────────────────────┴──────┘
+// Layout:
+//   ┌──────────────── header (Frame, purple) ──────────────────┐
+//   │                                                            │
+//   │  preview iframe   │ tool │   visual editor  │  properties │
+//   │  ─────────────    │ bar  │                  │             │
+//   │  JSON file panel  │      │                  │             │
+//   │  (toggleable)     │      │                  │             │
+//   └──────────────────┴──────┴──────────────────┴──────────────┘
 //
-// Files are saved as `slowdash-NAME.json` so the same JSON is rendered by
-// the existing slowdash.html viewer (auto-wraps view_box+items as a canvas
-// panel — see slowdash.mjs:58–76).
-//
-// URL parameters:
-//   config=slowdash-NAME.json   load this layout on startup
-//   mode=edit|view              start mode (defaults: edit if no config given)
+// Files are saved as `slowdash-NAME.json` so slowdash.html (`panel-canvas`)
+// renders them unchanged. The JSON shown in the bottom-left panel is the
+// authoritative source — both the visual editor and the live preview iframe
+// stay in sync with whatever it contains.
 
 import { JG as $ } from '../slowjs/jagaimo/jagaimo.mjs';
 import { Frame }  from '../slowjs/frame.mjs';
@@ -27,11 +26,27 @@ import {
     openOpenCanvasDialog,
     openSaveCanvasDialog,
     openCanvasSizeDialog,
+    openImageDialog,
     buildPropertiesPanel,
     buildCanvasInspector,
 } from './canvas-dialogs.mjs';
 
 const AUTOSAVE_DELAY_MS = 800;
+const JSON_SYNC_DELAY_MS = 350;
+const HISTORY_MAX = 80;
+
+// Friendly emoji prefixes for the toolbar buttons. Picked to be both clear
+// and a little playful — the user asked for "cute and relevant" emojis.
+const ITEM_EMOJI = {
+    text:     '🔤',
+    box:      '🟦',
+    circle:   '⭕',
+    button:   '🔘',
+    image:    '🖼️',
+    valve:    '🎚️',
+    solenoid: '🌀',
+    grid:     '🧮',
+};
 
 
 export class CanvasApp {
@@ -41,12 +56,28 @@ export class CanvasApp {
         this.propsPanel      = null;
         this.canvasInspector = null;
         this.projectConfig   = null;
-        this.layoutName      = null;       // name without prefix/ext
+        this.layoutName      = null;
         this.layoutTitle     = null;
         this.editing         = false;
+
         this._previewIframe  = null;
+        this._jsonPanel      = null;
+        this._jsonEditor     = null;          // Ace editor instance
+        this._jsonVisible    = false;
         this._refreshTimer   = null;
         this._autosaveTimer  = null;
+        this._jsonSyncTimer  = null;
+
+        // History: array of stringified layouts. _historyIdx points at the
+        // *current* state; undo decrements, redo increments.
+        this._history    = [];
+        this._historyIdx = -1;
+
+        // Re-entrancy guards. We update three views (visual editor, JSON,
+        // preview) from one source of truth, but they each also fire change
+        // events — without these flags we'd loop forever.
+        this._syncing   = false;
+        this._restoring = false;
     }
 
     async run() {
@@ -61,15 +92,12 @@ export class CanvasApp {
             return;
         }
 
-        // Load the theme CSS *before* building the header so its CSS variables
-        // (--sd-header-bg etc.) are available the moment .sd-header renders.
         const theme = this.projectConfig?.style?.theme || 'light';
         try { await this._loadTheme(theme); }
         catch (e) { console.warn('Theme CSS failed to load; falling back to defaults.', e); }
 
         this._buildLayout();
 
-        // Header — same Frame helper used by slowplot.html / slowdash.html
         const projTitle = this.projectConfig?.project?.title
                        || this.projectConfig?.project?.name
                        || 'SlowDash';
@@ -81,6 +109,7 @@ export class CanvasApp {
         this._buildHeaderControls();
 
         this._wireEditorEvents();
+        this._wireGlobalKeys();
 
         if (configFile) {
             await this._loadLayout(configFile);
@@ -91,11 +120,14 @@ export class CanvasApp {
         const startInEdit = (modeParam === 'edit') || !configFile || (modeParam !== 'view');
         this.setEditing(startInEdit);
 
+        // Seed history with the initial state so the very first edit can be undone.
+        this._pushHistory(true);
+
         this._startDataRefresh();
     }
 
 
-    // ── Theme load (mirrors Platform._load_theme in slowdash) ────────────── //
+    // ── Theme load (mirrors Platform._load_theme) ────────────────────────── //
 
     _loadTheme(theme) {
         return new Promise((resolve, reject) => {
@@ -120,9 +152,6 @@ export class CanvasApp {
             editBtn.title       = editing ? 'Switch to view mode' : 'Switch to edit mode';
         }
 
-        // In edit mode: show toolbar, props column, and live preview pane.
-        // In view mode: collapse the editing UI and let the iframe (or fallback)
-        // take the whole content area.
         document.getElementById('sc-toolbar').style.display    = editing ? 'flex' : 'none';
         document.getElementById('sc-props-col').style.display  = editing ? 'flex' : 'none';
         document.getElementById('sc-editor-col').style.display = editing ? 'flex' : 'none';
@@ -135,8 +164,6 @@ export class CanvasApp {
     _newCanvas() {
         this.layoutName  = null;
         this.layoutTitle = null;
-        // New canvases include a grid item by default so the saved JSON
-        // renders with a grid in slowdash.html (matches editor's overlay).
         this.editor.loadLayout({
             view_box: '0 0 1024 768',
             items: [
@@ -145,14 +172,19 @@ export class CanvasApp {
         });
         this.canvasInspector?.refresh();
 
-        // Drop ?config=… so refreshing won't reload the previous layout.
         const url = new URL(window.location.href);
         url.searchParams.delete('config');
         history.replaceState(null, '', url.toString());
 
         document.title = 'SD Canvas — (untitled)';
+        this._syncJsonFromEditor();
         this._updatePreview();
         this.frame.setStatus('New canvas — give it a name and Save to start the live preview');
+
+        // Reset history; the new state becomes the only entry.
+        this._history    = [];
+        this._historyIdx = -1;
+        this._pushHistory(true);
     }
 
     async _loadLayout(filenameOrName) {
@@ -163,10 +195,15 @@ export class CanvasApp {
 
             this.editor.loadLayout(doc);
             this.canvasInspector?.refresh();
+            this._syncJsonFromEditor();
             this._updatePreview();
 
             document.title = `SD Canvas — ${this.layoutTitle}`;
             this.frame.setStatus(`Loaded: ${this.layoutTitle}`);
+
+            this._history    = [];
+            this._historyIdx = -1;
+            this._pushHistory(true);
         } catch (e) {
             this.frame.setStatus(`Error loading layout: ${e.message}`);
             console.error(e);
@@ -200,7 +237,6 @@ export class CanvasApp {
         }
     }
 
-    /** Debounced autosave on every layout change. Only runs once a name is set. */
     _scheduleAutosave() {
         if (!this.layoutName) return;
         clearTimeout(this._autosaveTimer);
@@ -210,7 +246,6 @@ export class CanvasApp {
         }, AUTOSAVE_DELAY_MS);
     }
 
-    /** Refresh the live preview iframe by reloading the same URL. */
     _updatePreview() {
         if (!this._previewIframe) return;
 
@@ -227,8 +262,6 @@ export class CanvasApp {
         this._previewIframe.removeAttribute('srcdoc');
         this._previewIframe.src = url + '&_t=' + Date.now();
 
-        // Once the iframe loads, hide the duplicated slowdash header.
-        // Same-origin so we can reach into the document.
         this._previewIframe.onload = () => {
             try {
                 const doc = this._previewIframe.contentDocument;
@@ -242,16 +275,169 @@ export class CanvasApp {
                         '#sd-layout{margin:0!important;padding:0!important}';
                     doc.head.appendChild(style);
                 }
-            } catch (e) { /* cross-origin guard, shouldn't trigger here */ }
+            } catch (e) { /* same-origin so we never expect this */ }
         };
     }
 
 
-    // ── Data refresh (only used by editor preview, e.g. data-display items) // ──
+    // ── JSON panel ───────────────────────────────────────────────────────── //
 
-    _startDataRefresh() {
-        if (this._refreshTimer) clearInterval(this._refreshTimer);
-        this._refreshTimer = setInterval(() => { /* no-op for now */ }, 30000);
+    _setupJsonEditor(host) {
+        if (!window.ace) {
+            host.textContent = 'Ace editor failed to load — JSON view unavailable.';
+            return;
+        }
+        const ed = window.ace.edit(host, {
+            mode:            'ace/mode/json',
+            theme:           'ace/theme/github',
+            useWorker:       false,
+            showPrintMargin: false,
+            tabSize:         2,
+            useSoftTabs:     true,
+            wrap:            true,
+        });
+        ed.session.setUseWrapMode(true);
+        ed.setOption('fontSize', '12px');
+
+        // Cmd/Ctrl-S triggers a manual save (autosave still runs on its own).
+        ed.commands.addCommand({
+            name:    'sc-save',
+            bindKey: { win: 'Ctrl-S', mac: 'Cmd-S' },
+            exec:    () => {
+                if (this.layoutName) this._saveLayout(this.layoutName, this.layoutTitle);
+                else openSaveCanvasDialog(null, (name, title) => this._saveLayout(name, title));
+            },
+        });
+
+        ed.session.on('change', () => {
+            // Ignore programmatic updates triggered by the visual editor.
+            if (this._syncing) return;
+            this._scheduleEditorSyncFromJson();
+        });
+
+        this._jsonEditor = ed;
+    }
+
+    /** Push the editor's current layout into the JSON panel. */
+    _syncJsonFromEditor() {
+        if (!this._jsonEditor) return;
+        const doc  = this.editor.getLayout();
+        if (this.layoutName) {
+            doc.meta = { ...(doc.meta || {}), name: this.layoutName, title: this.layoutTitle || this.layoutName };
+        }
+        const text = JSON.stringify(doc, null, 2);
+        // Avoid feedback loop with the change handler.
+        this._syncing = true;
+        try {
+            const cur = this._jsonEditor.getValue();
+            if (cur !== text) {
+                const pos = this._jsonEditor.getCursorPosition();
+                this._jsonEditor.setValue(text, -1);
+                this._jsonEditor.moveCursorToPosition(pos);
+            }
+        } finally {
+            this._syncing = false;
+        }
+    }
+
+    /** Debounced — apply the JSON pane back to the visual editor. */
+    _scheduleEditorSyncFromJson() {
+        clearTimeout(this._jsonSyncTimer);
+        this._jsonSyncTimer = setTimeout(() => this._applyJsonToEditor(), JSON_SYNC_DELAY_MS);
+    }
+
+    _applyJsonToEditor() {
+        if (!this._jsonEditor) return;
+        const text = this._jsonEditor.getValue();
+        let doc;
+        try { doc = JSON.parse(text); }
+        catch (e) {
+            this.frame.setStatus(`JSON error: ${e.message}`);
+            return;
+        }
+
+        // Apply to the visual editor without echoing back into the JSON pane.
+        this._syncing = true;
+        try {
+            this.editor.loadLayout(doc);
+            this.canvasInspector?.refresh();
+        } finally {
+            this._syncing = false;
+        }
+
+        // Treat as a user change: record history and trigger autosave.
+        if (!this._restoring) this._pushHistory();
+        this._scheduleAutosave();
+        this._updatePreview();
+        this.frame.setStatus('JSON applied');
+    }
+
+    _toggleJsonPanel(forceState) {
+        const visible = (forceState === undefined) ? !this._jsonVisible : !!forceState;
+        this._jsonVisible = visible;
+        this._jsonPanel.style.display = visible ? 'flex' : 'none';
+        const btn = document.getElementById('sc-json-toggle');
+        if (btn) btn.textContent = visible ? '📝 JSON ▾' : '📝 JSON ▸';
+
+        // Keep contents fresh whenever the panel becomes visible.
+        if (visible) {
+            this._syncJsonFromEditor();
+            // Ace needs a resize after being unhidden.
+            this._jsonEditor?.resize(true);
+        }
+    }
+
+
+    // ── Undo / redo ──────────────────────────────────────────────────────── //
+
+    _pushHistory(initial = false) {
+        if (this._restoring) return;
+        const snap = JSON.stringify(this.editor.getLayout());
+
+        if (!initial && this._historyIdx >= 0 && this._history[this._historyIdx] === snap) {
+            return;  // no actual change
+        }
+
+        // Drop any "redo" suffix when a new edit branches off.
+        if (this._historyIdx < this._history.length - 1) {
+            this._history.length = this._historyIdx + 1;
+        }
+        this._history.push(snap);
+        if (this._history.length > HISTORY_MAX) this._history.shift();
+        this._historyIdx = this._history.length - 1;
+    }
+
+    _undo() {
+        if (this._historyIdx <= 0) return;
+        this._historyIdx -= 1;
+        this._restoreFromHistory();
+        this.frame.setStatus('Undo');
+    }
+
+    _redo() {
+        if (this._historyIdx >= this._history.length - 1) return;
+        this._historyIdx += 1;
+        this._restoreFromHistory();
+        this.frame.setStatus('Redo');
+    }
+
+    _restoreFromHistory() {
+        const snap = this._history[this._historyIdx];
+        if (!snap) return;
+        const doc = JSON.parse(snap);
+
+        this._restoring = true;
+        this._syncing   = true;
+        try {
+            this.editor.loadLayout(doc);
+            this.canvasInspector?.refresh();
+        } finally {
+            this._syncing   = false;
+            this._restoring = false;
+        }
+        this._syncJsonFromEditor();
+        this._scheduleAutosave();
+        this._updatePreview();
     }
 
 
@@ -262,26 +448,58 @@ export class CanvasApp {
         body.innerHTML = '';
         body.className = 'sc-body';
 
-        // Live preview column (left)
-        const previewCol = document.createElement('div');
-        previewCol.id        = 'sc-preview-col';
-        previewCol.className = 'sc-preview-col';
+        // Left column: live preview (top) + JSON panel (bottom, toggleable)
+        const leftCol = document.createElement('div');
+        leftCol.id        = 'sc-preview-col';
+        leftCol.className = 'sc-preview-col';
+
+        // Preview header + iframe
         const previewHdr = document.createElement('div');
-        previewHdr.className = 'sc-preview-hdr';
+        previewHdr.className   = 'sc-preview-hdr';
         previewHdr.textContent = 'Live Preview';
-        previewCol.appendChild(previewHdr);
+        leftCol.appendChild(previewHdr);
+
+        const previewWrap = document.createElement('div');
+        previewWrap.className = 'sc-preview-wrap';
         const iframe = document.createElement('iframe');
-        iframe.className   = 'sc-preview-iframe';
-        iframe.title       = 'Slowdash live preview';
-        previewCol.appendChild(iframe);
+        iframe.className = 'sc-preview-iframe';
+        iframe.title     = 'Slowdash live preview';
+        previewWrap.appendChild(iframe);
+        leftCol.appendChild(previewWrap);
         this._previewIframe = iframe;
-        body.appendChild(previewCol);
+
+        // JSON panel header (always visible — has the toggle button)
+        const jsonHdr = document.createElement('div');
+        jsonHdr.className = 'sc-preview-hdr sc-json-hdr';
+        const jsonHdrLabel = document.createElement('span');
+        jsonHdrLabel.textContent = 'JSON Source';
+        const toggleBtn = document.createElement('button');
+        toggleBtn.id          = 'sc-json-toggle';
+        toggleBtn.className   = 'sc-mini-btn';
+        toggleBtn.textContent = '📝 JSON ▸';
+        toggleBtn.title       = 'Show or hide the JSON source';
+        toggleBtn.addEventListener('click', () => this._toggleJsonPanel());
+        jsonHdr.appendChild(jsonHdrLabel);
+        jsonHdr.appendChild(toggleBtn);
+        leftCol.appendChild(jsonHdr);
+
+        // JSON panel body (Ace editor)
+        const jsonPanel = document.createElement('div');
+        jsonPanel.className = 'sc-json-panel';
+        jsonPanel.style.display = 'none';
+        const jsonHost = document.createElement('div');
+        jsonHost.className = 'sc-json-host';
+        jsonPanel.appendChild(jsonHost);
+        leftCol.appendChild(jsonPanel);
+        this._jsonPanel = jsonPanel;
+
+        body.appendChild(leftCol);
 
         // Splitter
         const splitter = document.createElement('div');
         splitter.className = 'sc-splitter';
         body.appendChild(splitter);
-        this._wireSplitter(splitter, previewCol);
+        this._wireSplitter(splitter, leftCol);
 
         // Toolbar
         const toolbar = document.createElement('div');
@@ -290,12 +508,12 @@ export class CanvasApp {
         body.appendChild(toolbar);
         this._buildToolbar(toolbar);
 
-        // Editor column
+        // Visual editor column
         const editorCol = document.createElement('div');
         editorCol.id        = 'sc-editor-col';
         editorCol.className = 'sc-editor-col';
         const editorHdr = document.createElement('div');
-        editorHdr.className = 'sc-preview-hdr';
+        editorHdr.className   = 'sc-preview-hdr';
         editorHdr.textContent = 'Editor';
         editorCol.appendChild(editorHdr);
         const editorWrap = document.createElement('div');
@@ -316,13 +534,16 @@ export class CanvasApp {
         propsCol.className = 'sc-props-col';
         body.appendChild(propsCol);
 
-        const itemPanelDiv = document.createElement('div');
+        const itemPanelDiv   = document.createElement('div');
         const canvasPanelDiv = document.createElement('div');
         propsCol.appendChild(itemPanelDiv);
         propsCol.appendChild(canvasPanelDiv);
 
         this.propsPanel      = buildPropertiesPanel(itemPanelDiv, { getPropertyFields });
         this.canvasInspector = buildCanvasInspector(canvasPanelDiv, this.editor);
+
+        // Initialize Ace once the host div is in the DOM.
+        this._setupJsonEditor(jsonHost);
     }
 
     _wireSplitter(splitter, previewCol) {
@@ -332,9 +553,8 @@ export class CanvasApp {
             const startW = previewCol.getBoundingClientRect().width;
             const total  = previewCol.parentElement.getBoundingClientRect().width;
 
-            // While dragging, lay an invisible overlay over the page so the
-            // iframe inside the preview pane can't swallow mousemove events
-            // (that's why the previous version only let you drag rightwards).
+            // Veil over the page so the iframe inside the preview pane can't
+            // swallow mousemove events when the cursor crosses it.
             const veil = document.createElement('div');
             veil.style.cssText = 'position:fixed;inset:0;cursor:col-resize;z-index:99999';
             document.body.appendChild(veil);
@@ -347,6 +567,7 @@ export class CanvasApp {
                 window.removeEventListener('mousemove', onMove);
                 window.removeEventListener('mouseup',   onUp);
                 veil.remove();
+                this._jsonEditor?.resize(true);
             };
             window.addEventListener('mousemove', onMove);
             window.addEventListener('mouseup',   onUp);
@@ -356,8 +577,8 @@ export class CanvasApp {
     _buildToolbar(toolbar) {
         const buttons = [
             {
-                id: 'tb-add-canvas',
-                label: 'Set Size',
+                id: 'tb-set-size',
+                label: '📐 Set Size',
                 title: 'Set the canvas page width and height',
                 action: () => openCanvasSizeDialog(this.editor.getCanvasBounds(), (b) => {
                     this.editor.setCanvasBounds(b);
@@ -367,14 +588,27 @@ export class CanvasApp {
             { type: 'separator' },
             ...getItemTypes().map(t => ({
                 id: `tb-add-${t}`,
-                label: 'Add ' + getItemLabel(t),
+                label: `${ITEM_EMOJI[t] || '•'} Add ${getItemLabel(t)}`,
                 title: 'Add a ' + getItemLabel(t) + ' item',
-                action: () => this._onAddItem(t),
+                action: () => (t === 'image') ? this._onAddImage() : this._onAddItem(t),
             })),
             { type: 'separator' },
             {
+                id: 'tb-undo',
+                label: '↩️ Undo',
+                title: 'Undo (Ctrl/Cmd-Z)',
+                action: () => this._undo(),
+            },
+            {
+                id: 'tb-redo',
+                label: '↪️ Redo',
+                title: 'Redo (Ctrl/Cmd-Shift-Z)',
+                action: () => this._redo(),
+            },
+            { type: 'separator' },
+            {
                 id: 'tb-delete',
-                label: 'Delete Item',
+                label: '🗑️ Delete',
                 title: 'Delete the selected item (or press Backspace)',
                 action: () => {
                     if (this.editor.selectedId) this.editor.removeItem(this.editor.selectedId);
@@ -397,20 +631,45 @@ export class CanvasApp {
             toolbar.appendChild(btn);
         }
 
-        // Keyboard shortcut: Backspace/Delete removes selected item while editor focused.
-        document.addEventListener('keydown', (e) => {
-            if (!this.editing || !this.editor.selectedId) return;
-            const isInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
-            if (isInput) return;
-            if (e.key === 'Backspace' || e.key === 'Delete') {
-                this.editor.removeItem(this.editor.selectedId);
-                e.preventDefault();
-            }
-        });
-
         // Forward delete events from properties panel
         document.addEventListener('sc-props-delete', (e) => {
             this.editor.removeItem(e.detail._id);
+        });
+    }
+
+    _wireGlobalKeys() {
+        document.addEventListener('keydown', (e) => {
+            // Don't steal keys from form inputs / Ace.
+            const t = document.activeElement?.tagName;
+            const inAce = !!document.activeElement?.closest?.('.sc-json-host');
+            const inField = ['INPUT', 'TEXTAREA', 'SELECT'].includes(t);
+
+            // Undo / redo work even from within Ace, but Ace already has its
+            // own Ctrl-Z handler — we only need a global handler when focus
+            // is *not* inside Ace.
+            if (!inAce) {
+                const meta = e.ctrlKey || e.metaKey;
+                if (meta && !e.altKey) {
+                    if (e.key === 'z' || e.key === 'Z') {
+                        if (e.shiftKey) this._redo(); else this._undo();
+                        e.preventDefault();
+                        return;
+                    }
+                    if (e.key === 'y' || e.key === 'Y') {
+                        this._redo();
+                        e.preventDefault();
+                        return;
+                    }
+                }
+            }
+
+            // Backspace / Delete to remove the selected item.
+            if (this.editing && this.editor.selectedId
+                && !inField && !inAce
+                && (e.key === 'Backspace' || e.key === 'Delete')) {
+                this.editor.removeItem(this.editor.selectedId);
+                e.preventDefault();
+            }
         });
     }
 
@@ -429,13 +688,16 @@ export class CanvasApp {
 
         editorEl.addEventListener('sc-item-deselect', () => this.propsPanel.clear());
 
-        editorEl.addEventListener('sc-layout-change', () => {
+        // Visual edits (drag, resize, add, delete, prop change) flow through
+        // these events. We always update everything else from here.
+        const onChange = () => {
+            if (this._syncing) return;
+            this._pushHistory();
+            this._syncJsonFromEditor();
             this._scheduleAutosave();
-        });
-
-        editorEl.addEventListener('sc-canvas-resize', () => {
-            this._scheduleAutosave();
-        });
+        };
+        editorEl.addEventListener('sc-layout-change',  onChange);
+        editorEl.addEventListener('sc-canvas-resize',  onChange);
     }
 
     _buildHeaderControls() {
@@ -447,19 +709,20 @@ export class CanvasApp {
         editBtn.addEventListener('click', () => this.setEditing(!this.editing));
         this.frame.appendButton($(editBtn));
 
-        // New (blank document — clears the editor and preview)
+        // New
         const newBtn = document.createElement('button');
         newBtn.innerHTML = '&#x1f4c4;';
         newBtn.title     = 'New canvas (clear editor)';
         newBtn.addEventListener('click', () => {
-            if (this.editor.items.length > 1 || (this.editor.items.length === 1 && this.editor.items[0].type !== 'grid')) {
-                if (!confirm('Discard the current canvas and start over?')) return;
-            }
+            const isPristine =
+                this.editor.items.length === 0 ||
+                (this.editor.items.length === 1 && this.editor.items[0].type === 'grid');
+            if (!isPristine && !confirm('Discard the current canvas and start over?')) return;
             this._newCanvas();
         });
         this.frame.appendButton($(newBtn));
 
-        // Save (floppy disk — matches slowplot.html convention)
+        // Save
         const saveBtn = document.createElement('button');
         saveBtn.innerHTML = '&#x1f4be;';
         saveBtn.title     = 'Save canvas layout';
@@ -480,20 +743,28 @@ export class CanvasApp {
         });
         this.frame.appendButton($(openBtn));
 
-        // Home (house — matches slowplot.html)
+        // Home
         const homeBtn = document.createElement('button');
         homeBtn.innerHTML = '&#x1f3e0;';
         homeBtn.title     = 'Home';
         homeBtn.addEventListener('click', () => window.open('./'));
         this.frame.appendButton($(homeBtn));
-        homeBtn.style.marginLeft = '1em'; // matches slowplot.html (after appendButton)
+        homeBtn.style.marginLeft = '1em';
 
-        // Help (question mark — matches slowplot.html)
+        // Help
         const docBtn = document.createElement('button');
         docBtn.innerHTML = '&#x2753;';
         docBtn.title     = 'Documents';
         docBtn.addEventListener('click', () => window.open('./slowdocs/index.html'));
         this.frame.appendButton($(docBtn));
+    }
+
+
+    // ── Data refresh (placeholder for future live data on editor side) ───── //
+
+    _startDataRefresh() {
+        if (this._refreshTimer) clearInterval(this._refreshTimer);
+        this._refreshTimer = setInterval(() => { /* no-op */ }, 30000);
     }
 
 
@@ -505,7 +776,6 @@ export class CanvasApp {
         const cy  = c.y + c.height / 2;
         const cfg = makeDefaultConfig(type, cx, cy);
 
-        // Spread successive additions slightly so they don't stack exactly.
         const offset = (this.editor.items.length % 8) * 24;
         if (cfg.attr) {
             cfg.attr.x = (parseFloat(cfg.attr.x) || 0) + offset - 80;
@@ -514,6 +784,18 @@ export class CanvasApp {
 
         this.editor.addItem(cfg);
         this.frame.setStatus(`Added: ${getItemLabel(type)}`);
+    }
+
+    _onAddImage() {
+        openImageDialog(CanvasAPI, (filename) => {
+            const c   = this.editor.getCanvasBounds();
+            const cx  = c.x + c.width  / 2;
+            const cy  = c.y + c.height / 2;
+            const cfg = makeDefaultConfig('image', cx - 100, cy - 75);
+            cfg.attr.href = filename;
+            this.editor.addItem(cfg);
+            this.frame.setStatus(`Added image: ${filename}`);
+        });
     }
 }
 

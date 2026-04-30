@@ -61,6 +61,11 @@ export class CanvasEditor {
         this.gridLayer.style.display     = (editing && this.options.showGrid) ? '' : 'none';
         this.boundsLayer.style.display   = editing ? '' : 'none';
         this._rerenderAllItems();
+        // _renderGrid is gated on `this.editing`, so it must run *after* the
+        // mode flag is updated. Without this, loadLayout() (called before the
+        // first setEditing()) leaves the grid layer empty.
+        this._renderGrid();
+        this._renderBounds();
         if (!editing) this.deselect();
     }
 
@@ -404,20 +409,42 @@ export class CanvasEditor {
         if (step <= 0) return;
 
         const { x, y, width, height } = this.canvas;
-        let d = '';
-        for (let gx = x; gx <= x + width + 0.5; gx += step) {
-            d += `M ${gx} ${y} L ${gx} ${y + height} `;
+
+        // Two passes: a softer minor grid every `step`, and a stronger major
+        // grid every 5 steps. Stroke widths are deliberately set in canvas units
+        // and made slightly bigger than 1 px so they survive viewBox scaling.
+        const minorPath = document.createElementNS(SVG_NS, 'path');
+        const majorPath = document.createElementNS(SVG_NS, 'path');
+        let minor = '';
+        let major = '';
+
+        for (let gx = x, i = 0; gx <= x + width + 0.5; gx += step, i++) {
+            const seg = `M ${gx} ${y} L ${gx} ${y + height} `;
+            if (i % 5 === 0) major += seg; else minor += seg;
         }
-        for (let gy = y; gy <= y + height + 0.5; gy += step) {
-            d += `M ${x} ${gy} L ${x + width} ${gy} `;
+        for (let gy = y, j = 0; gy <= y + height + 0.5; gy += step, j++) {
+            const seg = `M ${x} ${gy} L ${x + width} ${gy} `;
+            if (j % 5 === 0) major += seg; else minor += seg;
         }
-        const path = document.createElementNS(SVG_NS, 'path');
-        path.setAttribute('d',      d);
-        path.setAttribute('stroke', 'rgba(120,120,200,0.25)');
-        path.setAttribute('stroke-width', '0.5');
-        path.setAttribute('fill',   'none');
-        path.setAttribute('class',  'sc-grid');
-        this.gridLayer.appendChild(path);
+
+        // `vector-effect: non-scaling-stroke` keeps the lines a constant
+        // screen pixel width regardless of how the viewBox is zoomed/panned.
+        // Without it the lines collapse to sub-pixel and disappear entirely.
+        minorPath.setAttribute('d',      minor);
+        minorPath.setAttribute('stroke', 'rgba(70, 0, 132, 0.30)');
+        minorPath.setAttribute('stroke-width', '1');
+        minorPath.setAttribute('vector-effect', 'non-scaling-stroke');
+        minorPath.setAttribute('fill',   'none');
+        minorPath.setAttribute('class',  'sc-grid sc-grid-minor');
+        this.gridLayer.appendChild(minorPath);
+
+        majorPath.setAttribute('d',      major);
+        majorPath.setAttribute('stroke', 'rgba(70, 0, 132, 0.55)');
+        majorPath.setAttribute('stroke-width', '1.5');
+        majorPath.setAttribute('vector-effect', 'non-scaling-stroke');
+        majorPath.setAttribute('fill',   'none');
+        majorPath.setAttribute('class',  'sc-grid sc-grid-major');
+        this.gridLayer.appendChild(majorPath);
     }
 
 

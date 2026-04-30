@@ -24,6 +24,12 @@
   <link rel="stylesheet" type="text/css" id="sd-theme-css">
   <!-- Canvas-editor-specific layout and components -->
   <link rel="stylesheet" type="text/css" href="slowcanvas/canvas.css">
+
+  <!-- Ace editor (vendored with slowdash, used by the JSON panel below the
+       live preview). Loaded synchronously so canvas-app.mjs can use the global
+       `ace` symbol after DOMContentLoaded. -->
+  <script src="slow-extern/ace-builds/src-min-noconflict/ace.js"
+          type="text/javascript" charset="utf-8"></script>
 </head>
 
 <body>
